@@ -88,28 +88,94 @@ public class GridManager : MonoBehaviour
     /// </summary>
     public void InitializeGrid()
     {
+        InitializeGrid(null, -1, -1, -1, null);
+    }
+
+    /// <summary>
+    /// 扩展初始化：允许临时覆盖 rows/cols/typeCount，或直接指定类型列表。
+    /// </summary>
+    /// <param name="overrideRows">-1 表示使用默认值</param>
+    /// <param name="overrideCols">-1 表示使用默认值</param>
+    /// <param name="overrideTypeCount">-1 表示使用默认值（颜色/精灵数）</param>
+    /// <param name="exactTypeList">
+    /// 若不为空，则长度必须 == rows*cols，按行优先顺序直接分配类型 ID
+    /// （索引 0 = (row=1,col=1)，索引 cols-1 = (row=1,col=cols)，以此类推）。
+    /// </param>
+    public void InitializeGrid(int?[,] snapshot,
+        int overrideRows = -1, int overrideCols = -1, int overrideTypeCount = -1,
+        List<int> exactTypeList = null)
+    {
+        // 应用覆盖参数
+        int useRows = overrideRows > 0 ? overrideRows : rows;
+        int useCols = overrideCols > 0 ? overrideCols : cols;
+        rows = useRows; cols = useCols;
+
         // 创建数据数组，尺寸加 2 是为了包含边界外虚拟区域
         gridData = new int?[rows + 2, cols + 2];
         tiles = new Tile[rows + 2, cols + 2];
 
-        int totalPairs = (rows * cols) / 2; // 总对数
+        int totalTiles = rows * cols;
+        int totalPairs = totalTiles / 2; // 总对数（若 rows*cols 奇，这里向下取整）
+
         // 判断是否使用精灵图片
         bool useSprites = tileSprites != null && tileSprites.Length > 0;
-        // 确定图标种类数：使用精灵时为精灵数量，否则取颜色数和总对数中的较小值
-        int numTypes = useSprites ? tileSprites.Length :
-            Mathf.Min(totalPairs, tileColors != null ? tileColors.Length : 8);
+        int availableTypes = useSprites ? tileSprites.Length :
+            Mathf.Max(1, tileColors != null ? tileColors.Length : 8);
 
-        // 生成类型列表：每种类型出现两次（配对）
-        List<int> typeList = new List<int>();
-        for (int i = 0; i < totalPairs; i++)
+        // 实际类型数：优先 exactTypeList 里出现的种类数，其次 overrideTypeCount，最后默认
+        int numTypes;
+        if (overrideTypeCount > 0) numTypes = Mathf.Min(overrideTypeCount, availableTypes);
+        else numTypes = availableTypes;
+        numTypes = Mathf.Max(1, numTypes);
+
+        // 生成类型列表
+        List<int> typeList;
+        if (exactTypeList != null && exactTypeList.Count == totalTiles)
         {
-            int type = i % numTypes; // 循环使用类型
-            typeList.Add(type);
-            typeList.Add(type);
+            typeList = new List<int>(exactTypeList);
+        }
+        else if (snapshot != null && snapshot.GetLength(0) == rows + 2 && snapshot.GetLength(1) == cols + 2)
+        {
+            // 从快照展开为行优先列表
+            typeList = new List<int>(totalTiles);
+            for (int r = 1; r <= rows; r++)
+                for (int c = 1; c <= cols; c++)
+                    typeList.Add(snapshot[r, c] ?? 0);
+        }
+        else
+        {
+            // 默认生成：循环使用类型，两两配对后打乱
+            typeList = new List<int>();
+            for (int i = 0; i < totalPairs; i++)
+            {
+                int type = i % numTypes;
+                typeList.Add(type);
+                typeList.Add(type);
+            }
+            // 若网格总数为奇数（理论不应出现），补一个占位类型
+            while (typeList.Count < totalTiles) typeList.Add(0);
+            Shuffle(typeList);
         }
 
-        // 随机打乱类型列表
-        Shuffle(typeList);
+        // ===== 关键修复：typeId 归一化，保证与可用颜色/精灵数匹配 =====
+        // 当玩家在关卡设计器设置的 typeCount > tileColors/tileSprites 数量时，
+        // 快照里会出现 typeId 超过调色板容量的情况：如果直接传给 Tile.Init，
+        // 相同颜色的两个瓦片 typeId 会不同（例如 typeId=8 与 0 颜色相同），
+        // 玩家看起来颜色一致但永远无法消除，直观表现就是"生成的关卡玩不了"。
+        // 解决方案：对 typeList 中每一项统一对 availableTypes 取模，
+        // 保证"相同颜色的瓦片必然有相同 typeId 所以必然可配对"。
+        // 由于 LevelGenerator 生成时每个 id 都有偶数次出现，取模后仍然保持偶次。
+        int mod = Mathf.Max(1, availableTypes);
+        for (int i = 0; i < typeList.Count; i++)
+        {
+            int raw = typeList[i];
+            // 负数保险：处理 -1
+            if (raw < 0) raw = 0;
+            typeList[i] = raw % mod;
+        }
+        // 同步修正 overrideTypeCount：取模后实际最大可能类型数 = Mathf.Min(override, available)
+        if (overrideTypeCount > 0)
+            numTypes = Mathf.Min(numTypes, availableTypes);
 
         // 清除旧的瓦片对象
         ClearExistingTiles();
@@ -123,26 +189,21 @@ public class GridManager : MonoBehaviour
             for (int c = 1; c <= cols; c++)
             {
                 int typeId = typeList[index];
-                gridData[r, c] = typeId; // 记录类型
+                gridData[r, c] = typeId;
 
-                // 计算世界坐标：列方向递增、行方向递减（行号从上到下）
                 Vector3 pos = startPos + new Vector3((c - 1) * tileSize, -(r - 1) * tileSize, 0);
-                // 实例化瓦片
                 GameObject tileObj = Instantiate(tilePrefab, pos, Quaternion.identity, tileContainer);
-                tileObj.transform.localScale = Vector3.one * tileSize; // 缩放到瓦片大小
-                tileObj.SetActive(true); // 激活（预制体默认是禁用的）
+                tileObj.transform.localScale = Vector3.one * tileSize;
+                tileObj.SetActive(true);
 
-                // 获取或添加 Tile 组件
                 Tile tile = tileObj.GetComponent<Tile>();
                 if (tile == null) tile = tileObj.AddComponent<Tile>();
 
-                // 根据类型确定颜色和精灵
-                Color color = tileColors[typeId % tileColors.Length];
-                Sprite sprite = useSprites ? tileSprites[typeId % tileSprites.Length] : null;
-                // 初始化瓦片
+                Color color = tileColors[typeId % Mathf.Max(1, tileColors.Length)];
+                Sprite sprite = useSprites ? tileSprites[typeId % Mathf.Max(1, tileSprites.Length)] : null;
                 tile.Init(r, c, typeId, color, OnTileClicked, sprite);
 
-                tiles[r, c] = tile; // 保存引用
+                tiles[r, c] = tile;
                 index++;
             }
         }
@@ -158,6 +219,37 @@ public class GridManager : MonoBehaviour
             gridData[0, c] = null;
             gridData[rows + 1, c] = null;
         }
+    }
+
+    /// <summary>
+    /// 将当前 gridData 压缩成 int 列表（-1 = null），长度 = (rows+2)*(cols+2)。
+    /// 用于 LevelInstance 持久化。
+    /// </summary>
+    public List<int> SnapshotGrid()
+    {
+        if (gridData == null) return new List<int>();
+        int R = gridData.GetLength(0);
+        int C = gridData.GetLength(1);
+        List<int> snap = new List<int>(R * C);
+        for (int r = 0; r < R; r++)
+            for (int c = 0; c < C; c++)
+                snap.Add(gridData[r, c] ?? -1);
+        return snap;
+    }
+
+    /// <summary>从 SnapshotGrid 压缩列表恢复 int?[,] 网格数据（仅返回，不赋值）。</summary>
+    public static int?[,] RestoreSnapshot(List<int> snap, int rows, int cols)
+    {
+        if (snap == null || snap.Count != (rows + 2) * (cols + 2)) return null;
+        int?[,] g = new int?[rows + 2, cols + 2];
+        int k = 0;
+        for (int r = 0; r < rows + 2; r++)
+            for (int c = 0; c < cols + 2; c++)
+            {
+                int v = snap[k++];
+                g[r, c] = v < 0 ? (int?)null : v;
+            }
+        return g;
     }
 
     /// <summary>

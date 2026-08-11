@@ -19,6 +19,9 @@ public class BotController : MonoBehaviour
     /// <summary>Bot 是否运行中（只读），供 UIManager 查询按钮文字</summary>
     public bool IsRunning => isRunning;
 
+    /// <summary>等价于 StopBot()，兼容 UIManager/GameController 调用。</summary>
+    public void Stop() => StopBot();
+
     private void Awake()
     {
         instance = this; // 设置单例

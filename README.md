@@ -16,7 +16,8 @@
 程序启动后显示标题界面，包含：
 - **游戏标题** "连 连 看"（居中大号字体）
 - **开始游戏**（绿色按钮）— 进入游戏，初始化棋盘并开始计时
-- **结束游戏**（红色按钮）— 关闭程序（`Application.Quit()`）
+- **关卡设计**（橙色按钮）— 进入关卡设计器（见第六章）
+- **结束游戏**（红色按钮）— 关闭程序（`Application.Quit()`，仅在打包成可执行程序后生效）
 
 ### 2. 游戏主界面
 
@@ -29,6 +30,7 @@
 | 重新开始 | 底部左侧 | 重置棋盘、分数和计时，开始新一局 |
 | 重新排列 | 底部中间 | 将剩余图标随机打乱位置 |
 | Bot 演示 | 底部上方 | 启动/停止自动游戏模式 |
+| 返回按钮 | 右上角（计时器下方） | 智能切换：「从关卡列表进入」显示「返回关卡列表」→ 点击回到生成关卡列表页；「从标题页进入」显示「返回标题」→ 点击回到标题页。点击时终止当前局（停止计时、停 Bot、清状态） |
 
 ### 2.5 难度指标评价功能
 
@@ -79,11 +81,14 @@
 - 游戏胜利时 Bot 自动停止
 
 ### 6. 过关面板
-所有图标消除后弹出，显示：
-- **恭喜过关！**
-- **用时 MM:SS**
-- **再来一局** — 重置游戏
-- **结束游戏** — 关闭程序
+所有图标消除后弹出，**根据本局进入来源显示不同的按钮组合**：
+
+| 进入来源 | 按钮组合 | 说明 |
+|----------|----------|------|
+| 标题页「开始游戏」 | 上方「再来一局」（默认蓝）<br>下方「返回标题」（蓝灰） | 重开同尺寸新局 / 终止当前局回到标题页 |
+| 关卡列表「开始体验」 | **仅一个**「返回关卡列表」（橙色） | 终止当前局 → 回到生成关卡列表页（自动刷新，显示刚保存的通关记录与最新最佳用时） |
+
+> 原「结束游戏」（退出程序）按钮已从过关面板移除，避免玩家误以为通关后要关闭游戏；退出程序仅保留在标题页红色「结束游戏」按钮。
 
 ---
 
@@ -115,11 +120,11 @@ GameInitializer
 
 **关键函数**：
 
-- `SetupGame()` — 依次创建：Camera → Canvas → Tile预制体 → GridManager → LineDrawer → UIManager（含UI） → GameController → BotController；然后调用 `SetReferences` 将 GridManager、LineDrawer 和 UIManager 注入 GameController
+- `SetupGame()` — 依次创建：Camera → Canvas → Tile预制体 → GridManager → LineDrawer → **GameController** → UIManager（含UI） → BotController；其中 GameController 必须先于 UIManager 创建（保证 UIManager 订阅通关事件时单例已存在，否则成绩记录不写入），随后调用 `SetReferences` 将 GridManager、LineDrawer 和 UIManager 注入 GameController
 - `SetupUI()` — 创建四个 UI 层次：
-  1. **TitlePanel**：标题文字 + 开始/退出按钮
-  2. **GameHud**（游戏时可见，标题时隐藏）：分数/计时文字 + 难度指标按钮 + 重新开始/重新排列/Bot 演示按钮 + GameOverPanel + DifficultyPanel
-  3. **GameOverPanel**（默认隐藏）：过关提示文字 + 再来一局/结束游戏按钮
+  1. **TitlePanel**：标题文字 + 开始/关卡设计/退出按钮
+  2. **GameHud**（游戏时可见，标题时隐藏）：分数/计时文字 + 返回按钮 + 难度指标按钮 + 重新开始/重新排列/Bot 演示按钮 + GameOverPanel + DifficultyPanel
+  3. **GameOverPanel**（默认隐藏）：过关提示文字 + 来源感知按钮（再来一局/返回关卡列表/返回标题）
   4. **DifficultyPanel**（默认隐藏）：深色半透明面板 + RectMask2D 遮罩 + 多行指标文本
 - `MakeText()` — 创建 Text 组件，设置锚点、位置、字体、大小、溢出模式
 - `MakeButton()` — 创建 Button 组件（含 Image+Button+子 Text），返回 Button 引用
@@ -541,11 +546,13 @@ Canvas (ScreenSpaceOverlay, 1920×1080 参考)
 ├── TitlePanel (深色背景)
 │   ├── TitleText ("连 连 看")
 │   ├── StartButton ("开始游戏")
+│   ├── LevelDesignButton ("关卡设计"，橙色)
 │   └── TitleQuitButton ("结束游戏")
 │
 └── GameHud (默认隐藏，游戏时可见)
     ├── ScoreText (左上，0%~30% 宽度)
     ├── TimerText (右上，70%~100% 宽度)
+    ├── BackButton (右上，计时器下方，来源感知：「返回关卡列表 / 返回标题」)
     ├── DifficultyButton (左侧偏上，紫色，anchoredPosition=(15,-80))
     ├── DifficultyPanel (左侧居中，默认隐藏)
     │   ├── RectMask2D 遮罩
@@ -553,11 +560,13 @@ Canvas (ScreenSpaceOverlay, 1920×1080 参考)
     ├── RestartButton (底部左)
     ├── ShuffleButton (底部中)
     ├── BotButton (底部上)
-    └── GameOverPanel (semi-transparent overlay, 默认隐藏)
+    └── GameOverPanel (semi-transparent overlay, 默认隐藏，来源感知)
         ├── GameOverText (用时信息)
-        ├── OverRestartButton ("再来一局")
-        └── OverQuitButton ("结束游戏")
+        ├── OverRestartButton ("再来一局"，仅标题来源显示)
+        └── OverQuitButton (来源感知：「返回关卡列表」橙色 / 「返回标题」蓝灰)
 ```
+
+> UIManager 还管理关卡设计器三块动态面板（LevelDesignPanel / LevelSelectorPanel / RecordPanel），详见第六章 6.1 界面结构。
 
 **关键函数**：
 
@@ -568,8 +577,11 @@ Canvas (ScreenSpaceOverlay, 1920×1080 参考)
 - `OnBotClicked()` — 调用 BotController.ToggleBot() 后立即更新按钮文字
 - `OnDifficultyClicked()` — 难度指标按钮回调：
   1. 切换 difficultyPanel 的显隐状态
-  2. 若为显示状态，调用 `DifficultyAnalyzer.Analyze()` 计算当前关卡难度指标
+  2. 若为显示状态：自定义关卡优先复用 `LevelInstance.metrics` 预计算快照，否则调用 `DifficultyAnalyzer.Analyze()` 实时计算当前盘面
   3. 调用 `UpdateDifficultyText(DifficultyAnalyzer.FormatMetrics(...))` 格式化并显示文本
+- `EnsureLevelClearedSubscribed()` — 幂等订阅 `GameController.OnLevelCleared`（先 -= 再 +=），在开始游戏 / 再来一局 / 关卡列表开始体验三入口调用，防御初始化时序导致通关成绩不记录
+- `CoGenerateLevels()` — 协程逐关生成关卡 + 橙色动态进度条（详见 6.4）
+- `OnGameOverBackButtonClicked()` / `OnInGameBackClicked()` — 过关面板与 HUD 返回按钮回调，按 `_lastFromLevelList` 来源分派：返回关卡列表（`OpenLevelSelector`）或返回标题（`ShowTitle`），前置调用 `TerminateCurrentLevel` 终止当前局
 
 ---
 
@@ -582,10 +594,13 @@ GameInitializer.Start()
        ├─ 创建 Camera、Canvas
        ├─ 创建 GridManager → 设置参数
        ├─ 创建 LineDrawer → 设置预制体
-       ├─ 创建 UIManager → SetupUI() 创建所有 UI
-       ├─ 创建 GameController → SetReferences(gm, ld, ui)
+       ├─ 创建 GameController（必须早于 UI！）
+       ├─ 创建 UIManager → SetupUI() 创建所有 UI → 内部订阅 GameController.OnLevelCleared
+       ├─ gameController.SetReferences(gridManager, lineDrawer, uiManager)（依赖注入）
        └─ 创建 BotController
 ```
+
+> **创建顺序关键点**：`GameController` 必须先于 `UIManager` 创建。`UIManager.SetUIReferences` 内部会订阅 `GameController.Instance.OnLevelCleared`（用于通关自动写记录）；若顺序相反，订阅时单例尚为 null 会被跳过，通关记录将永远无法写入（曾为此专门修复）。GameController 的依赖注入 `SetReferences` 则统一放在 UI 创建完成之后。
 
 ### 用户点击消除流程
 ```
@@ -626,7 +641,8 @@ BotController.StartBot()
        ├─ 切换 difficultyPanel.activeSelf（显示 ↔ 隐藏）
        │
        └─ [显示状态]
-            ├─ DifficultyAnalyzer.Analyze()
+            ├─ [自定义关卡且存在 metrics 快照] 直接复用 LevelInstance.metrics（不重算，保证权威值）
+            ├─ [否则] DifficultyAnalyzer.Analyze()
             │    ├─ 收集类型分组 → 计算 totalPairs / validPairCount
             │    ├─ 遍历同类型组合 → PathFinder.FindPath()
             │    │    └─ 汇总 M1 VMD / M2 TTE / M3 TSD / M4 APT / M5 CPR
@@ -671,6 +687,9 @@ GameController、GridManager、UIManager、BotController 均使用单例模式�
 
 ### 适配不同分辨率
 Canvas 使用 `ScaleWithScreenSize` 模式，参考分辨率 1920×1080，UI 元素使用**百分比锚定**（0~0.3、0.7~1）适应不同宽高比。
+针对 **4K 显示器**（3840×2160 或非 16:9 窗口）做了专项优化：
+- `CanvasScaler.screenMatchMode = MatchWidthOrHeight` + `matchWidthOrHeight = 0.5`（宽高各 50% 权重），使 UI 在任意分辨率下按整数倍缩放，避免非整数 scaleFactor 导致文字双线性插值发虚
+- 主相机 `clearFlags = SolidColor` + `backgroundColor = Color.black` 纯黑清屏，避免 Skybox 模式下瓦片边缘出现 1px 白边/毛边
 
 ### 可量化难度评价体系
 基于《连连看关卡生成设计方案》文档实现三维度 × 8 指标的完整难度量化模型：
@@ -693,3 +712,141 @@ Canvas 使用 `ScaleWithScreenSize` 模式，参考分辨率 1920×1080，UI 元
 - 使用 **RectMask2D** 组件为难度面板添加矩形遮罩，无论文字内容多少，超出深色区域的部分一律被裁剪
 - 文本采用「Wrap 自动换行 + Truncate 纵向裁剪 + RectMask2D 遮罩」三重保护机制，保证信息始终完整落在深色区域内
 - 文字四周内边距 16px，避免文本紧贴面板边缘影响可读性
+
+---
+
+## 六、关卡设计器
+
+在标题界面的「开始游戏」按钮下方新增**橙色「关卡设计」**按钮，玩家可进入可视化关卡设计流程：**配置参数 → 预测综合难度 → 批量生成 N 个关卡 → 选择关卡进入体验 → 通关后记录时间并可查看/删除**。整体流程保证不破坏原有「标题界面 / 游戏 HUD / 难度指标面板」等既有内容与功能。
+
+### 6.1 入口与界面结构
+
+```
+标题界面 TitlePanel
+  └─ 关卡设计按钮 (橙色)
+       └─ LevelDesignPanel (关卡设计面板)
+            ├─ 基础参数：行数 / 列数 / 配对类型数 / 生成关卡数量
+            ├─ 8 个难度指标设置区（每行：标签 / 按分级 Toggle / 归一化值 / 分级下拉 / 当前所属分级）
+            ├─ 综合难度 DD 实时预览 (数值 + 等级)
+            ├─ 生成进度条（生成时显示：橙色填充条 + 「X/N  XX%」+ 超时兜底计数）
+            ├─ 通关记录按钮 / 返回标题按钮
+            └─ 生成关卡按钮 → 进入 LevelSelectorPanel (关卡列表)
+                 ├─ ScrollRect + Content，每个关卡一张卡片
+                 │    ├─ 关卡编号、id、尺寸、类型数、DD、最佳用时、通关次数
+                 │    ├─ 开始体验 → GameHud，手动进入游戏
+                 │    └─ 查看记录 → RecordPanel（该关卡的通关记录）
+                 ├─ 刷新列表 / 返回关卡设计 / 返回标题
+                 └─ 通关 RecordPanel
+                      ├─ 表头 4 列（可点击切换排序 + ↑/↓ 指示）：
+                      │    通关序号 / 通关时长 / 通关日期 / 操作
+                      ├─ 每条记录：第 N 次通关 / mm:ss.cs / yyyy-MM-dd HH:mm:ss / 行内删除按钮
+                      ├─ 最佳用时记录以金绿色高亮
+                      ├─ 删除选中记录（底部）/ 返回关卡设计 / 关闭
+                      └─ 无记录时显示「📭 尚无通关记录」占位提示
+```
+
+### 6.2 难度指标的双向联动
+
+对 8 个量化指标 (M1~M8) 同时支持两种设置方式，并保持**双向联动**：
+
+| 操作 | 行为 |
+|------|------|
+| 玩家在「归一化值」输入框手动输入 0~1 数值 | 右侧「当前所属分级」立即按区间（极易/简单/普通/困难/极难）反查并刷新文字颜色，同时底部综合 DD 实时重算 |
+| 玩家勾选「按分级」Toggle 并在下拉选择分级 | 在对应分级区间内**随机生成一个归一化值**，同步写入数值输入框，并刷新综合 DD |
+| 切换「按分级」Toggle 开关 | 开启：数值输入框只读，分级下拉可用，立即按当前分级随机一次；关闭：数值输入框可写，下拉只读，当前所属分级按现有值反查 |
+| 修改行数 / 列数 / 类型数 | 综合 DD 预览立即按 PredictOverallDD 重新估算并显示颜色化难度等级 |
+
+5 个难度分级对应的归一化区间：
+
+```
+极易 VeryEasy : [0.00, 0.20)
+简单 Easy     : [0.20, 0.40)
+普通 Normal   : [0.40, 0.60)
+困难 Hard     : [0.60, 0.80)
+极难 VeryHard : [0.80, 1.00]
+```
+
+### 6.3 综合难度 DD 的实时预测
+
+综合难度 DD 采用 `DifficultyAnalyzer.PredictOverallDD(rows, cols, types, norms)` 估算：
+- 结构项：`结构难度 = clamp((R*C*types) / 2000, 0, 1)`，使棋盘尺寸和类型数对 DD 产生单调贡献（越大越难）
+- 指标项：`8 指标加权` 采用 VPD(30%) + PRD(45%) + SPD(25%) 与分析体系一致的权重
+- 总项：`0.4 * 结构难度 + 0.6 * 指标加权`，兼顾"尺寸类型大小"和"指标组合难度"
+
+### 6.4 生成关卡
+
+点击「生成关卡」按钮后，`UIManager` 启动**协程逐关生成** `CoGenerateLevels`，并显示**动态进度条**（不阻塞 UI）：
+
+1. **生成前清空旧关卡**：调用 `LevelRecordManager.ClearAll()` 移除之前所有批次的关卡与记录，保证关卡列表**严格等于本次设定的数量 N**（不再跨批次累计）
+2. 逐关调用 `LevelGenerator.GenerateSingle(cfg, out timedOut)`：
+   - 每生成一关 `yield return null` 让 Unity 渲染一帧，进度条实时走一格
+   - 每关立即 `UpsertLevel + SaveAll` 落盘（中途崩溃也不丢已生成关卡）
+   - 单个关卡超过 5 秒未收敛 → 按给定行列/类型数**随机兜底生成**并在卡片上标注「超时生成失败，已随机生成」，进度条文字同时显示「超时兜底 N」
+3. 全部完成后进度条保持 100% 约 0.8 秒，随后：
+   - 全部成功 → 绿色提示并自动跳转关卡列表
+   - 有超时 → 黄色警告提示超时数量并跳转关卡列表
+   - 生成失败（0 个）→ 红色错误提示，不跳转
+4. 关卡结构：`config / gridSnapshot / metrics / overallDD / bestTime / generationTimedOut / remark`，通过 `SaveAll()` 序列化持久化（PlayerPrefs JSON）
+
+### 6.5 关卡体验 + 难度指标实时查看
+
+在关卡列表卡片点击「开始体验」：
+- 调用 `GameController.StartNewGame(LevelInstance)`：使用 `gridSnapshot` 恢复棋盘、锁定行数/列数/类型数、绑定当前 `levelId`
+- 进入游戏 HUD 后，可随时点击左侧「难度指标」按钮：
+  - 若当前关卡是自定义关卡（存在 `LevelInstance.metrics` 快照），优先**直接复用预计算的 8 指标快照**，以保证游戏中任何时刻（包括部分消除后）看到的指标都是该关卡初始完整棋盘的权威值
+  - 否则仍按原逻辑实时计算当前盘面
+- HUD 右上角「返回按钮」**智能切换文字**（`SyncHudBackButtonText`）：从关卡列表进入显示「返回关卡列表」，点击调用 `GameController.TerminateCurrentLevel` 终止当前局并回到关卡列表；从标题页进入显示「返回标题」，点击回到标题页
+- 过关面板按钮组合同样**来源感知**（`SyncGameOverPanelForSource`）：从关卡列表进入时仅显示橙色「返回关卡列表」一个按钮；从标题页进入时显示「再来一局 + 返回标题」
+- 通关（所有对消除完毕）时，`GameController` 触发 `OnLevelCleared(levelId, clearTime)`，UIManager 订阅该事件并调用 `LevelRecordManager.AddClearRecord` 写入用时与时间戳
+
+### 6.6 通关记录保存与删除
+
+`LevelRecordManager` 提供 `UpsertLevel / AddClearRecord / DeleteLevel / SaveAll / LoadAll` 全套接口，底层使用 `PlayerPrefs.SetString("LinkGame_Levels", JsonUtility)` 持久化：
+- 每个 `LevelInstance` 记录：`id / config / gridSnapshot / metrics / overallDD / bestTime / clearRecords(List<float>) / recordTimestamps(List<string>)`
+- 通关后自动保存：`AddClearRecord` 追加一条记录并更新 `bestTime`，随后调用 `SaveAll()`
+
+在 RecordPanel 中查看/删除：
+- 可从关卡设计面板「通关记录」按钮或每张关卡卡片「查看记录」进入
+- 顶部显示当前关卡元信息（id / 尺寸 / DD / 通关次数）
+- **4 列固定宽度布局**（永不重叠）：通关序号(110px) / 通关时长(180px) / 通关日期(260px) / 操作(120px)，列间 10px 间距、行高 44px、行距 8px
+- 表头「通关序号 / 通关时长 / 通关日期」为**可点击排序按钮**，当前排序列高亮并带 ↑/↓ 指示：
+  - 通关序号：默认升序（第 1 次 → 第 N 次）
+  - 通关时长：默认升序（快 → 慢），一键定位最快通关
+  - 通关日期：默认降序（最新 → 最旧）
+  - 再次点击同列表头翻转升降序
+- 每行记录显示：`第 N 次通关 / mm:ss.cs / yyyy-MM-dd HH:mm:ss`（日期精确到秒）
+- **最佳用时记录以金绿色高亮**，一眼识别历史最快通关
+- 每行右侧带红色「删除」按钮，点击直接删除该条记录（无需先选中）
+- 底部「删除选中记录」按钮：点击单条记录行高亮选中后再删除
+- 删除通过 `origIndex → 排序映射` 定位真实记录（排序后也不会删错），随后自动重算 bestTime、持久化并刷新列表
+- 无任何记录时显示「📭 尚无通关记录」空态占位提示
+
+### 6.7 新增脚本与关键扩展
+
+| 脚本 | 说明 |
+|------|------|
+| `LevelConfig.cs` | 新增核心数据结构：`DifficultyGrade` 枚举、`DifficultyGradeUtil`（区间 + 随机值 + 颜色/名称映射）、`MetricConstraint`（支持「按值/按分级」两种约束）、`LevelConfig`（行/列/类型数 + 8 个指标约束）、`LevelInstance`（生成后关卡快照 + 指标 + 通关记录） |
+| `LevelGenerator.cs` | 静态工具类：`Generate(cfg, count)` 批量生成（目标指标解析 → 随机类型列表 → 评估 → 迭代调优 300 轮，MSE 加权最小化，0.18 偏差提前收敛）；新增 `GenerateSingle(cfg, out timedOut, timeoutMsPerLevel)` 单关生成，内部异常捕获 + 超时/失败时按参数随机兜底并置 `generationTimedOut` 标注，供 UI 协程逐关调用 |
+| `DifficultyAnalyzer.cs` | 扩展 `NormalizedValueToGrade` / `GradeToRandomNormalized` 双向转换、`ResolveTargetNorms`（从配置解析 8 个归一化目标值）、`PredictOverallDD`（结构+指标的综合难度估算） |
+| `LevelRecordManager.cs` | 单例持久化：`List<LevelInstance>` 以 JSON 存储在 PlayerPrefs，支持关卡增删查（`ClearAll` 生成前清空旧批次保证严格数量）、通关记录添加、删除后重算 bestTime |
+| `GameController.cs` | 扩展 `StartNewGame(LevelInstance, int? overrideRows, int? overrideCols)`（仅要求 `level != null` 即绑定 `currentLevelId`，config 为空也不丢成绩）；新增 `OnLevelCleared(string, float)` 事件，`pairsRemaining==0` 时触发；新增 `TerminateCurrentLevel()` 终止当前局 |
+| `GridManager.cs` | 扩展 `Initialize(int? overrideRows, int? overrideCols, int? overrideTypes, int? seed, int[] snapshot)`，支持指定尺寸 / 类型数 / 种子 / 快照恢复 |
+| `GameInitializer.cs` | 新增 `MakeInputField / MakeDropdown / MakeToggle` 辅助；标题页加入「关卡设计」按钮；新增 `SetupLevelDesignerUI` 构建 LevelDesignPanel / LevelSelectorPanel / RecordPanel 三块 UI 及生成进度条；**GameController 创建顺序提前到 UIManager 之前**（保证通关事件订阅不丢失）；CanvasScaler 宽高匹配 + 相机 SolidColor 黑底（4K 适配） |
+| `UIManager.cs` | 重写 `SetUIReferences` 新签名（注入三面板、8 指标控件数组、生成按钮、记录按钮、进度条引用等）；双向联动 / DD 预览 / 生成绑定 / 关卡列表动态卡片 / 通关事件写入 / 记录面板增删均在 UIManager 内实现；`CoGenerateLevels` 协程逐关生成（每关 `yield return null` 刷新橙色进度条 + 严格数量 + 超时兜底计数）；`EnsureLevelClearedSubscribed` 幂等订阅通关事件（开始游戏/再来一局/开始体验三入口防御初始化时序）；记录面板 `RecSortField` 排序模型 + `_recordOrigIndexOrder` 排序映射保证排序后删除不删错 |
+
+### 6.8 完整使用流程
+
+1. 启动游戏 → 标题界面，点击「**关卡设计**」
+2. 调整**基础参数**：行数(2~20)、列数(2~20)、类型数(2~64)、生成关卡数量(1~50)
+3. 对 8 个**难度指标**逐一设置：
+   - 方法 A：在数值输入框直接输入 0~1 数值，观察「当前所属分级」
+   - 方法 B：勾选「按分级」，然后在下拉选择极易/简单/普通/困难/极难，值会自动在区间内随机
+4. 观察「**综合 DD 预览**」颜色化显示数值与所属分级，必要时回退参数
+5. 点击「**生成关卡**」→ 显示**动态进度条**（橙色填充 + 「X/N XX%」+ 超时兜底计数），系统逐关生成**严格等于 N 个**关卡（生成前自动清空旧批次，不跨批次累计），每关即时落盘；完成后进度条保持 100% 约 0.8 秒再跳转关卡列表；有超时关卡会以黄色警告提示并在卡片上标注「超时生成失败，已随机生成」
+6. 在关卡列表中：
+   - 点击某关卡「开始体验」→ 进入游戏 HUD，可随时点击左侧「难度指标」查看该关卡的 8 项难度指标（使用预计算的初始棋盘快照，不受中途消除影响）
+   - 点击「查看记录」→ 打开记录面板查看该关卡的过往通关用时
+   - 从关卡列表进入的局，HUD 返回按钮与过关面板均只显示「返回关卡列表」入口
+7. 通关：恭喜过关弹窗显示用时，同时用时自动保存到记录
+8. 查看/排序记录：点击表头「通关序号 / 通关时长 / 通关日期」切换排序（再次点击同列翻转升降序），观察 ↑/↓ 指示；金绿色高亮行为历史最佳用时
+9. 删除记录：点击某行高亮 → 底部「删除选中记录」，或直接点行内红色「删除」按钮；删除后自动重算最佳用时并刷新

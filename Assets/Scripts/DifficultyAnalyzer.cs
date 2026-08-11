@@ -9,6 +9,9 @@ using UnityEngine;
 /// </summary>
 public static class DifficultyAnalyzer
 {
+    /// <summary>最近一次 Analyze() 的原始 8 指标值（VMD,TTE,TSD,APT,CPR,DW,DF,logSB）。UIManager 显示时用于可选扩展展示。</summary>
+    public static float[] LastRawValues { get; private set; }
+
     /// <summary>
     /// 难度指标计算结果。
     /// 包含 8 个原始指标值、归一化值和综合难度评分。
@@ -229,6 +232,9 @@ public static class DifficultyAnalyzer
 
         // 难度等级
         m.difficultyLevel = GetDifficultyLevel(m.DD);
+
+        // 缓存 LastRawValues（按 UI 数组顺序：VMD,TTE,TSD,APT,CPR,DW,DF,logSB）
+        LastRawValues = new float[] { m.VMD, m.TTE, m.TSD, m.APT, m.CPR, m.DW, m.DF, m.logSB };
 
         return m;
     }
@@ -504,6 +510,107 @@ public static class DifficultyAnalyzer
         return "极难";
     }
 
+    // ---------- 关卡设计器辅助：指标/等级双向转换、综合难度预测 ----------
+
+    /// <summary>
+    /// 单个指标归一化值 → 难度等级。
+    /// </summary>
+    public static DifficultyGrade NormalizedValueToGrade(float norm)
+    {
+        return DifficultyGradeUtil.GetGrade(Mathf.Clamp01(norm));
+    }
+
+    /// <summary>
+    /// 单个指标难度等级 → 在该等级区间内随机取一个归一化值。
+    /// </summary>
+    public static float GradeToRandomNormalized(DifficultyGrade g, System.Random rng = null)
+    {
+        return DifficultyGradeUtil.RandomInGrade(g, rng);
+    }
+
+    /// <summary>
+    /// 根据 LevelConfig 读取每个指标的目标归一化值。
+    /// 若 useGrade=true，则在等级区间随机生成；否则取指定的 normalizedValue。
+    /// 返回长度为 8 的数组，按 MetricId 顺序（VMD/TTE/TSD/APT/CPR/DW/DF/SB）。
+    /// </summary>
+    public static float[] ResolveTargetNorms(LevelConfig cfg, System.Random rng = null)
+    {
+        if (cfg == null || cfg.metrics == null || cfg.metrics.Count != 8)
+            return new float[] { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+
+        float[] norms = new float[8];
+        for (int i = 0; i < 8; i++)
+        {
+            var m = cfg.metrics[i];
+            norms[i] = Mathf.Clamp01(m.useGrade
+                ? DifficultyGradeUtil.RandomInGrade(m.grade, rng)
+                : m.normalizedValue);
+        }
+        return norms;
+    }
+
+    /// <summary>
+    /// 根据目标归一化指标数组，预测综合难度 DD 和所属等级。
+    /// 仅用于关卡设计器实时预览（不执行实际棋盘生成/模拟）。
+    /// </summary>
+    public static float PredictOverallDD(float[] targetNorms)
+    {
+        if (targetNorms == null || targetNorms.Length < 8) return 0.5f;
+        // 按 Analyze() 中的权重聚合：
+        float VPD = w1 * targetNorms[0] + w2 * targetNorms[1] + w3 * targetNorms[2];
+        float PRD = w4 * targetNorms[3] + w5 * targetNorms[4];
+        float SPD = w6 * targetNorms[5] + w7 * targetNorms[6] + w8 * targetNorms[7];
+        float DD = alpha * VPD + beta * PRD + gamma * SPD;
+        return Mathf.Clamp01(DD);
+    }
+
+    /// <summary>
+    /// 预测综合难度 DD：结构难度（尺寸/类型数）+ 8 指标加权。
+    /// 用于关卡设计器底部预览。
+    /// </summary>
+    public static float PredictOverallDD(int rows, int cols, int types, float[] norms)
+    {
+        float metricDD = PredictOverallDD(norms);
+        float structure = Mathf.Clamp01((float)(rows * cols * types) / 2000f);
+        float dd = 0.4f * structure + 0.6f * metricDD;
+        return Mathf.Clamp01(dd);
+    }
+
+    /// <summary>
+    /// 返回 8 个指标的中文标签（含编号），用于 UI 显示。
+    /// </summary>
+    public static readonly string[] MetricLabels = new string[]
+    {
+        "M1 有效解密度 VMD",
+        "M2 图标类型熵 TTE",
+        "M3 空间离散度 TSD",
+        "M4 平均路径转弯数 APT",
+        "M5 复杂路径占比 CPR",
+        "M6 决策宽度 DW",
+        "M7 死锁频率 DF",
+        "M8 解序列分支度 SB",
+    };
+
+    /// <summary>
+    /// 根据 DifficultyMetrics 返回第 id 个指标的归一化值。
+    /// </summary>
+    public static float GetNormById(DifficultyMetrics m, MetricId id)
+    {
+        if (m == null) return 0f;
+        switch (id)
+        {
+            case MetricId.VMD: return m.VMD_norm;
+            case MetricId.TTE: return m.TTE_norm;
+            case MetricId.TSD: return m.TSD_norm;
+            case MetricId.APT: return m.APT_norm;
+            case MetricId.CPR: return m.CPR_norm;
+            case MetricId.DW:  return m.DW_norm;
+            case MetricId.DF:  return m.DF_norm;
+            case MetricId.SB:  return m.SB_norm;
+            default: return 0f;
+        }
+    }
+
     /// <summary>
     /// 将指标格式化为多行文本，用于 UI 显示。
     /// </summary>
@@ -529,5 +636,32 @@ public static class DifficultyAnalyzer
                $"─────────────────\n" +
                $"类型数: {m.numTypes}  总瓦片: {m.totalTiles}\n" +
                $"可连通对: {m.validPairCount}/{m.totalPairs}";
+    }
+
+    /// <summary>
+    /// FormatMetrics 双参兼容版（第二个参数 rawValues 保留但忽略，用于 UI 调用兼容）。
+    /// </summary>
+    public static string FormatMetrics(DifficultyMetrics m, float[] rawValues) => FormatMetrics(m);
+
+    /// <summary>
+    /// 以 8 个归一化值数组 + 可选原始值数组格式化显示（当没有完整 DifficultyMetrics 对象时用）。
+    /// </summary>
+    public static string FormatMetrics(float[] norms, float[] rawValues)
+    {
+        if (norms == null || norms.Length < 8) return "无法计算难度指标";
+        var g = NormalizedValueToGrade(
+            alpha * (w1 * norms[0] + w2 * norms[1] + w3 * norms[2]) +
+            beta  * (w4 * norms[3] + w5 * norms[4]) +
+            gamma * (w6 * norms[5] + w7 * norms[6] + w8 * norms[7])
+        );
+        string[] labels = MetricLabels;
+        string s = $"综合难度(预估): {PredictOverallDD(norms):F3} ({DifficultyGradeUtil.ToName(g)})\n─────────────────\n";
+        for (int i = 0; i < 8; i++)
+        {
+            float raw = (rawValues != null && rawValues.Length > i) ? rawValues[i] : float.NaN;
+            string rawStr = float.IsNaN(raw) ? "" : $" 原值:{raw:F3}";
+            s += $"{labels[i]}: 归一 {norms[i]:F3}{rawStr}\n";
+        }
+        return s;
     }
 }

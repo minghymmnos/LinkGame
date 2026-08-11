@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -36,6 +37,11 @@ public class GameController : MonoBehaviour
     private float gameTime = 0f;                       // 游戏累计时间（秒）
     private bool isTimerRunning = false;               // 计时器是否运行中
 
+    // ---------- 关卡设计器相关 ----------
+    private string currentLevelId = null;              // 当前正在体验的关卡 ID（null=普通随机局）
+    /// <summary>通关事件：参数为(levelId, clearTime_seconds)。UIManager 在 SetReferences 时订阅以记录通关时间。</summary>
+    public event Action<string, float> OnLevelCleared;
+
     /// <summary>单例访问器</summary>
     public static GameController Instance => instance;
     /// <summary>当前游戏状态（只读），供 BotController 查询</summary>
@@ -44,6 +50,8 @@ public class GameController : MonoBehaviour
     public int Score => score;
     /// <summary>游戏累计时间（只读）</summary>
     public float GameTime => gameTime;
+    /// <summary>当前关卡 ID（只读），null 表示标准随机局</summary>
+    public string CurrentLevelId => currentLevelId;
 
     private void Awake()
     {
@@ -92,33 +100,132 @@ public class GameController : MonoBehaviour
     /// </summary>
     public void StartNewGame()
     {
-        // 重置状态和数据
+        StartNewGame(null, null, null);
+    }
+
+    /// <summary>
+    /// 扩展开始新游戏：启动一个 LevelInstance（关卡设计器生成的已保存关卡）
+    /// 或按自定义参数启动一局（参数为 null 时使用默认）。
+    /// </summary>
+    /// <param name="level">指定已生成的关卡实例。若为 null 则按 override 参数启动标准局。</param>
+    /// <param name="overrideRows">null=不覆盖，沿用 level.config.rows 或默认值</param>
+    /// <param name="overrideCols">null=不覆盖，沿用 level.config.cols 或默认值</param>
+    public void StartNewGame(LevelInstance level, int? overrideRows = null, int? overrideCols = null)
+    {
+        // ================================================================
+        // 统一开头：所有模式都要重置状态（避免 level!=null 分支漏设 HUD/状态）
+        // —— 严格沿用旧 GameState 枚举（Idle/Selected/Animating/Won），不引入额外字段
+        // ================================================================
         currentState = GameState.Idle;
         firstSelectedTile = null;
         score = 0;
         gameTime = 0f;
         isTimerRunning = false;
 
+        int?[,] snapshot = null;
+        int r = -1, c = -1, t = -1;
+
+        // —— 条件放宽：只要求 level != null 就必赋 currentLevelId（成绩记录不依赖 config 是否为空）
+        //    旧条件 (level.config != null) 会导致 JSON 反序列化 config 为 null 时 currentLevelId 漏掉，
+        //    通关时 OnLevelCleared 传 null → UIManager 不记录成绩（这是本次成绩不保存的根因）。
+        if (level != null)
+        {
+            currentLevelId = level.levelId;
+            if (level.config != null)
+            {
+                r = level.config.rows;
+                c = level.config.cols;
+                t = level.config.typeCount;
+                snapshot = GridManager.RestoreSnapshot(level.gridSnapshot, r, c);
+            }
+            else
+            {
+                // config 为空的极端兜底：沿用整体 override 或默认；快照仍尝试加载 gridSnapshot
+                Debug.LogWarning($"[GameController] StartNewGame: level.levelId='{level.levelId}' 的 config==null，已保留 currentLevelId 用于成绩记录，但尺寸/快照使用默认/覆盖值。");
+                if (overrideRows.HasValue) r = overrideRows.Value;
+                if (overrideCols.HasValue) c = overrideCols.Value;
+                if (r > 0 && c > 0) snapshot = GridManager.RestoreSnapshot(level.gridSnapshot, r, c);
+            }
+        }
+        else
+        {
+            currentLevelId = null;
+            if (overrideRows.HasValue) r = overrideRows.Value;
+            if (overrideCols.HasValue) c = overrideCols.Value;
+        }
+
         // 清除所有残留连线
-        if (lineDrawer != null)
-            lineDrawer.ClearAllLines();
+        if (lineDrawer != null) lineDrawer.ClearAllLines();
 
-        // 重新生成棋盘
-        if (gridManager != null)
+        // 重新生成棋盘（按快照 or 随机）
+        if (gridManager != null) gridManager.InitializeGrid(snapshot, r, c, t, null);
+
+        // ================================================================
+        // 统一结尾：所有模式都同步 pairsRemaining / GameState 转 Idle(=开局可点) / HUD 刷新
+        // —— 注意：旧状态机没有 Playing 枚举；Idle 才是「棋盘已就绪，等待玩家点第一个瓦片」的正确语义。
+        // ================================================================
+        int rawR = (gridManager != null) ? gridManager.Rows : (r > 0 ? r : 0);
+        int rawC = (gridManager != null) ? gridManager.Cols : (c > 0 ? c : 0);
+        int totalTiles = Mathf.Max(0, rawR * rawC);
+        pairsRemaining = Mathf.Max(0, totalTiles / 2);
+
+        // 计时器启动 = 游戏开始进入「可被点击消除」状态；isTimerRunning 是原始代码唯一的"进行中"标记
+        isTimerRunning = true;
+        currentState = GameState.Idle;
+
+        // UI 更新：双保险（UIManager.Instance 优先，uiManager 字段兜底）
+        var ui = UIManager.Instance != null ? UIManager.Instance : uiManager;
+        if (ui != null)
         {
-            gridManager.InitializeGrid();
-            pairsRemaining = (gridManager.Rows * gridManager.Cols) / 2; // 计算总对数
+            ui.UpdateScore(score);
+            ui.UpdateTimer(gameTime);
+            ui.UpdatePairsRemaining(pairsRemaining);
+            ui.UpdateBotButtonText(false);
+            ui.HideDifficultyPanel();
+            ui.ShowGameOver(false, 0f);
         }
+        // 自定义关卡：缓存「当前关卡 id」→ 用户点「难度指标」时优先从 LevelInstance.metrics 读预计算快照
+        if (UIManager.Instance != null)
+            UIManager.Instance.CurrentMetricsLevelId = currentLevelId;
 
-        // 重置 UI 显示
-        if (uiManager != null)
+        Debug.Log($"[GameController] StartNewGame 完成：levelId={currentLevelId ?? "(随机局)"}, size={rawR}x{rawC}, pairs={pairsRemaining}, state={currentState}, isTimerRunning={isTimerRunning}");
+    }
+
+    /// <summary>
+    /// 玩家点击 HUD「返回标题」时调用：终止当前局（不记通关、不删保存记录）。
+    /// - 停止计时 / 重置 GameState=Idle / 清空高亮首瓦片 / 清连线
+    /// - 通知 BotController 停止演示
+    /// - 通知 UI 关闭 GameOver / Difficulty / 恢复 Bot 按钮文字显示为"Bot 演示"
+    /// </summary>
+    public void TerminateCurrentLevel()
+    {
+        if (!isTimerRunning && currentState == GameState.Idle && firstSelectedTile == null) return;
+        isTimerRunning = false;
+        currentState = GameState.Idle;
+        if (firstSelectedTile != null)
         {
-            uiManager.UpdateScore(score);
-            uiManager.UpdateTimer(gameTime);
-            uiManager.ShowGameOver(false, 0f); // 隐藏过关面板
+            firstSelectedTile.SetHighlight(false);
+            firstSelectedTile = null;
         }
+        score = 0;
+        gameTime = 0f;
+        pairsRemaining = 0;
+        if (lineDrawer != null) lineDrawer.ClearAllLines();
+        // BotController 不一定存在，用 null 判空即可（Unity 组件不可用/未初始化都视为 null）
+        var bot = BotController.Instance;
+        if (bot != null) bot.Stop();
 
-        isTimerRunning = true; // 启动计时器
+        var ui = UIManager.Instance != null ? UIManager.Instance : uiManager;
+        if (ui != null)
+        {
+            ui.ShowGameOver(false, 0f);
+            ui.HideDifficultyPanel();
+            ui.UpdateBotButtonText(false);
+            ui.UpdateScore(0);
+            ui.UpdateTimer(0f);
+            ui.UpdatePairsRemaining(0);
+        }
+        Debug.Log($"[GameController] TerminateCurrentLevel：levelId={currentLevelId ?? "(随机局)"} 已终止并回到标题页。");
     }
 
     /// <summary>
@@ -206,13 +313,22 @@ public class GameController : MonoBehaviour
                 pairsRemaining--;   // 剩余对数减一
 
                 if (uiManager != null)
+                {
                     uiManager.UpdateScore(score);
+                    uiManager.UpdatePairsRemaining(pairsRemaining);
+                }
+                // 双保险：若 UIManager.Instance 与字段不是同一对象（理论不会，但防御一下）
+                if (UIManager.Instance != null && UIManager.Instance != uiManager)
+                    UIManager.Instance.UpdatePairsRemaining(pairsRemaining);
 
                 if (pairsRemaining <= 0)
                 {
                     // 全部消除：胜利
                     isTimerRunning = false;
                     currentState = GameState.Won;
+                    // 发布通关事件（含 levelId 和用时），供 UI/记录管理器订阅
+                    try { OnLevelCleared?.Invoke(currentLevelId, gameTime); }
+                    catch (System.Exception e) { Debug.LogError("OnLevelCleared 回调异常: " + e.Message); }
                     if (uiManager != null)
                         uiManager.ShowGameOver(true, gameTime); // 显示过关面板和用时
                 }
