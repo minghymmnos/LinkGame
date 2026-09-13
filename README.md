@@ -728,7 +728,7 @@ Canvas 使用 `ScaleWithScreenSize` 模式，参考分辨率 1920×1080，UI 元
             ├─ 基础参数：行数 / 列数 / 配对类型数 / 生成关卡数量
             ├─ 8 个难度指标设置区（每行：标签 / 按分级 Toggle / 归一化值 / 分级下拉 / 当前所属分级）
             ├─ 综合难度 DD 实时预览 (数值 + 等级)
-            ├─ 生成进度条（生成时显示：橙色填充条 + 「X/N  XX%」+ 超时兜底计数）
+            ├─ 生成进度条（生成时显示：橙色填充条 + 「X/N  XX%」+ 超时计数）
             ├─ 通关记录按钮 / 返回标题按钮
             └─ 生成关卡按钮 → 进入 LevelSelectorPanel (关卡列表)
                  ├─ ScrollRect + Content，每个关卡一张卡片
@@ -778,15 +778,92 @@ Canvas 使用 `ScaleWithScreenSize` 模式，参考分辨率 1920×1080，UI 元
 点击「生成关卡」按钮后，`UIManager` 启动**协程逐关生成** `CoGenerateLevels`，并显示**动态进度条**（不阻塞 UI）：
 
 1. **生成前清空旧关卡**：调用 `LevelRecordManager.ClearAll()` 移除之前所有批次的关卡与记录，保证关卡列表**严格等于本次设定的数量 N**（不再跨批次累计）
-2. 逐关调用 `LevelGenerator.GenerateSingle(cfg, out timedOut)`：
-   - 每生成一关 `yield return null` 让 Unity 渲染一帧，进度条实时走一格
-   - 每关立即 `UpsertLevel + SaveAll` 落盘（中途崩溃也不丢已生成关卡）
-   - 单个关卡超过 5 秒未收敛 → 按给定行列/类型数**随机兜底生成**并在卡片上标注「超时生成失败，已随机生成」，进度条文字同时显示「超时兜底 N」
+2. 逐关调用 `LevelGenerator.GenerateSingle(cfg, out timedOut)`，内部采用**两阶段搜索 + 定向调优**（方案3 + 方案2）：
+   - 每生成一关 `yield return null` 让 Unity 渲染一帧，进度条实时走一格；每关立即 `UpsertLevel + SaveAll` 落盘（中途崩溃也不丢已生成关卡）
+   - **阶段一（快速筛选 + 定向调优）**：只评估静态指标 M1~M5（不跑蒙特卡洛），以**全局随机采样 + 定向变异局部爬山**交替推进——按偏差最大的指标选择变异算子（TTE 偏 → 类型分布迁移；VMD/TSD/APT/CPR 偏 → 位置交换），连续 40 次无改进则从**精英池**（静态最优 top-K=12）换起点或重新全局探索，避免陷入局部最优
+   - **阶段二（精评 + 局部精调）**：对精英池跑降采样蒙特卡洛（30 次）按完整 cost（显式指标 + 2×DD 偏差）选出全局最优，再对最优做 8 次"完整评估"的定向变异精调（继续下降动态指标 M6~M8 与 DD 偏差），最后用 100 次全量蒙特卡洛**最终复核**，保证存档指标可信
+   - **收敛判据（方案1）**：只要求"玩家显式设置过"的指标落入其目标等级区间即达标；全部未设置（全默认）时保持 8 指标偏差 ≤ 0.18 的旧判据
+   - **超时/未达标处理（方案1）**：超过 5 秒未收敛 → 返回**最接近目标的关卡**并在卡片上标注「未完全命中目标指标等级（最大偏差 X）」；仅当连候选都未产出（异常）时才随机生成兜底并标注「生成失败，已按给定参数随机生成」；进度条文字同时显示「超时 N」
 3. 全部完成后进度条保持 100% 约 0.8 秒，随后：
    - 全部成功 → 绿色提示并自动跳转关卡列表
    - 有超时 → 黄色警告提示超时数量并跳转关卡列表
    - 生成失败（0 个）→ 红色错误提示，不跳转
 4. 关卡结构：`config / gridSnapshot / metrics / overallDD / bestTime / generationTimedOut / remark`，通过 `SaveAll()` 序列化持久化（PlayerPrefs JSON）
+
+### 6.4.1 生成算法详解（两阶段搜索 + 定向调优）
+
+`LevelGenerator.GenerateSingle` 是生成质量的核心，围绕"**尽量命中玩家显式设置的指标等级**"设计，由三部分组成：
+
+**总体流程**
+
+```
+GenerateSingle(cfg, out timedOut)
+  │  解析目标：ResolveTargetNorms(cfg)  → targetNorms[8]（各指标目标归一值）
+  │            PredictOverallDD(...)     → targetDD（目标综合难度）
+  │            GetExplicitMetricFlags()  → explicitFlags[8]（哪些指标是玩家显式设置过的）
+  │
+  ├─ 阶段一：快速筛选 + 定向调优（仅静态指标 M1~M5，不跑蒙特卡洛）
+  │    ├─ 探索：GenerateTypeList() 全局随机采样
+  │    ├─ 定向爬山：DirectedMutate() 变异 → 静态评估 → cost 不升则接受为新起点
+  │    ├─ 多起点：连续 40 次无改进 → 从精英池换起点 / 重新全局探索
+  │    └─ 精英池：InsertElite() 保留静态最优 TOP_K=12（按静态 cost 升序）
+  │
+  ├─ 阶段二：精评 + 局部精调（含蒙特卡洛 M6~M8）
+  │    ├─ 对精英池逐个完整评估（SEARCH_MC=30 次模拟）→ 按完整 cost 选全局最优
+  │    └─ 对最优再做 8 次定向变异 + 完整评估爬山（继续下降 M6~M8 / DD 偏差）
+  │
+  └─ 最终复核：对最优以 FULL_MC=100 次模拟精确评估 → 写入 metrics（存档与展示用）
+```
+
+**关键数据结构与概念**
+
+| 名称 | 说明 |
+|------|------|
+| `typeList` | 长度 = rows×cols 的瓦片类型序列（按行优先），`BuildGridForEval` 将其打包成 (rows+2)×(cols+2) 网格求值 |
+| `explicitFlags[8]` | 标记"玩家显式设置过"的指标（`useGrade=true` 或归一值偏离默认 0.5）；若全部未设置则退化为全量参与 |
+| `cost` | 静态 cost = Σ(显式指标达标偏差) + 0.5×Σ\|实际值−目标值\|（软梯度）；完整 cost 再 + 2×\|DD−目标DD\| |
+| `MetricDev` 达标偏差 | 按分级：实际值到目标等级区间的距离（区间内=0）；按精确值：到目标点的绝对偏差 |
+| `elite` 精英池 | 保留静态最优 TOP_K 个候选，兼顾「阶段二精评队列」与「爬山换起点来源」 |
+
+**收敛判据（方案1：只约束玩家关心的指标）**
+
+- 玩家显式设置了某指标 → 要求其落入**目标等级区间**（或精确值）才算达标
+- 8 个指标全部未设置 → 沿用旧的"8 指标同时偏差 ≤ 0.18"判据
+- 静态指标全部达标、且未显式设置动态指标（M6~M8）→ 阶段一即可提前收敛
+
+**变异算子（方案2：指标分治）**
+
+| 算子 | 操作 | 适用场景 |
+|------|------|----------|
+| `MutateSwap` | 随机交换类型列表两格（等价于交换棋盘两格） | VMD / TSD / APT / CPR 偏差最大时（布局类） |
+| `MutateDistribution` | 把"一对"棋子从稀有类型迁移到常见类型（或反向），保持总数且不让类型消失 | **TTE 偏差最大时**（目标熵低→加剧集中，高→趋向均匀） |
+
+`DirectedMutate` 每一步挑出 M1~M5 中偏差最大的指标，据此选择上述算子——这使 **TTE 从"均匀分布下恒为 1、不可调"变为可控指标**。
+
+**关键参数**
+
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `TIMEOUT_MS_PER_LEVEL` | 5000 | 单关超时预算（毫秒） |
+| `TOP_K` | 12 | 精英池容量（阶段二精评数量） |
+| `PHASE1_MAX_ATTEMPTS` | 1500 | 阶段一最大尝试次数（实际受超时预算控制） |
+| `STAGNATION_LIMIT` | 40 | 爬山停滞上限（达到后换起点 / 重新探索） |
+| `SEARCH_MC` | 30 | 阶段二搜索期蒙特卡洛降采样次数 |
+| `PHASE2_HILL_ATTEMPTS` | 8 | 阶段二局部精调的变异尝试次数 |
+| `FULL_MC` | 100 | 最终复核的全量蒙特卡洛次数 |
+| `ACCEPTABLE_DEVIATION` | 0.18 | 全默认指标下的旧收敛阈值 |
+
+**超时与兜底策略**
+
+| 情况 | 处理 |
+|------|------|
+| 阶段一超时 | 用已积累的精英池进入阶段二精评 |
+| 阶段二超时 | 取已精评候选中的最优（保证至少完成 1 个候选，不会返回 null） |
+| 局部精调超时 | 仅停止优化，**不改写** timedOut（避免把已达标关卡误标为超时） |
+| 超时/未达标但已产出候选 | 返回**最接近目标**的关卡，`remark` 记录最大偏差，卡片标注「未完全达标」 |
+| 完全无产出（异常） | 随机生成兜底并置 `generationTimedOut=true`，卡片标注「生成失败，已按给定参数随机生成」 |
+
+**控制台日志**：每关生成后输出完整指标报告（关卡 id / 目标值+难度等级 → 实际值 → 逐项偏差 → 最大偏差 → 生成状态），达标用普通日志、超时/未达标用黄色警告，便于定位哪些指标难以达成。
 
 ### 6.5 关卡体验 + 难度指标实时查看
 
@@ -826,13 +903,13 @@ Canvas 使用 `ScaleWithScreenSize` 模式，参考分辨率 1920×1080，UI 元
 | 脚本 | 说明 |
 |------|------|
 | `LevelConfig.cs` | 新增核心数据结构：`DifficultyGrade` 枚举、`DifficultyGradeUtil`（区间 + 随机值 + 颜色/名称映射）、`MetricConstraint`（支持「按值/按分级」两种约束）、`LevelConfig`（行/列/类型数 + 8 个指标约束）、`LevelInstance`（生成后关卡快照 + 指标 + 通关记录） |
-| `LevelGenerator.cs` | 静态工具类：`Generate(cfg, count)` 批量生成（目标指标解析 → 随机类型列表 → 评估 → 迭代调优 300 轮，MSE 加权最小化，0.18 偏差提前收敛）；新增 `GenerateSingle(cfg, out timedOut, timeoutMsPerLevel)` 单关生成，内部异常捕获 + 超时/失败时按参数随机兜底并置 `generationTimedOut` 标注，供 UI 协程逐关调用 |
+| `LevelGenerator.cs` | 静态工具类：`Generate(cfg, count)` 批量生成与 `GenerateSingle(cfg, out timedOut, timeoutMsPerLevel)` 单关生成（供 UI 协程逐关调用），核心为**两阶段搜索 + 定向调优**（方案3 + 方案2）：阶段一静态评估（M1~M5，不跑蒙特卡洛）以「全局随机采样 + 定向变异局部爬山」交替推进（`DirectedMutate` 按偏差最大指标分治：TTE → `MutateDistribution` 类型分布迁移，其余 → `MutateSwap` 位置交换；连续 40 次无改进则从精英池换起点或重启探索）；阶段二对**精英池**（`InsertElite` 维护静态最优 top-K=12）跑降采样蒙特卡洛（SEARCH_MC=30 次）按完整 cost（显式指标达标偏差 + 2×DD 偏差）选优，再对最优做 8 次完整评估的定向变异精调，最后以 FULL_MC=100 次全量模拟**最终复核**。收敛判据（方案1）：仅要求显式设置的指标落入目标等级区间；超时/未达标时**返回最接近目标的关卡**并标注偏差，仅异常时才随机兜底 |
 | `DifficultyAnalyzer.cs` | 扩展 `NormalizedValueToGrade` / `GradeToRandomNormalized` 双向转换、`ResolveTargetNorms`（从配置解析 8 个归一化目标值）、`PredictOverallDD`（结构+指标的综合难度估算） |
 | `LevelRecordManager.cs` | 单例持久化：`List<LevelInstance>` 以 JSON 存储在 PlayerPrefs，支持关卡增删查（`ClearAll` 生成前清空旧批次保证严格数量）、通关记录添加、删除后重算 bestTime |
 | `GameController.cs` | 扩展 `StartNewGame(LevelInstance, int? overrideRows, int? overrideCols)`（仅要求 `level != null` 即绑定 `currentLevelId`，config 为空也不丢成绩）；新增 `OnLevelCleared(string, float)` 事件，`pairsRemaining==0` 时触发；新增 `TerminateCurrentLevel()` 终止当前局 |
 | `GridManager.cs` | 扩展 `Initialize(int? overrideRows, int? overrideCols, int? overrideTypes, int? seed, int[] snapshot)`，支持指定尺寸 / 类型数 / 种子 / 快照恢复 |
 | `GameInitializer.cs` | 新增 `MakeInputField / MakeDropdown / MakeToggle` 辅助；标题页加入「关卡设计」按钮；新增 `SetupLevelDesignerUI` 构建 LevelDesignPanel / LevelSelectorPanel / RecordPanel 三块 UI 及生成进度条；**GameController 创建顺序提前到 UIManager 之前**（保证通关事件订阅不丢失）；CanvasScaler 宽高匹配 + 相机 SolidColor 黑底（4K 适配） |
-| `UIManager.cs` | 重写 `SetUIReferences` 新签名（注入三面板、8 指标控件数组、生成按钮、记录按钮、进度条引用等）；双向联动 / DD 预览 / 生成绑定 / 关卡列表动态卡片 / 通关事件写入 / 记录面板增删均在 UIManager 内实现；`CoGenerateLevels` 协程逐关生成（每关 `yield return null` 刷新橙色进度条 + 严格数量 + 超时兜底计数）；`EnsureLevelClearedSubscribed` 幂等订阅通关事件（开始游戏/再来一局/开始体验三入口防御初始化时序）；记录面板 `RecSortField` 排序模型 + `_recordOrigIndexOrder` 排序映射保证排序后删除不删错 |
+| `UIManager.cs` | 重写 `SetUIReferences` 新签名（注入三面板、8 指标控件数组、生成按钮、记录按钮、进度条引用等）；双向联动 / DD 预览 / 生成绑定 / 关卡列表动态卡片 / 通关事件写入 / 记录面板增删均在 UIManager 内实现；`CoGenerateLevels` 协程逐关生成（每关 `yield return null` 刷新橙色进度条 + 严格数量 + 超时计数）；`EnsureLevelClearedSubscribed` 幂等订阅通关事件（开始游戏/再来一局/开始体验三入口防御初始化时序）；记录面板 `RecSortField` 排序模型 + `_recordOrigIndexOrder` 排序映射保证排序后删除不删错 |
 
 ### 6.8 完整使用流程
 
@@ -842,7 +919,7 @@ Canvas 使用 `ScaleWithScreenSize` 模式，参考分辨率 1920×1080，UI 元
    - 方法 A：在数值输入框直接输入 0~1 数值，观察「当前所属分级」
    - 方法 B：勾选「按分级」，然后在下拉选择极易/简单/普通/困难/极难，值会自动在区间内随机
 4. 观察「**综合 DD 预览**」颜色化显示数值与所属分级，必要时回退参数
-5. 点击「**生成关卡**」→ 显示**动态进度条**（橙色填充 + 「X/N XX%」+ 超时兜底计数），系统逐关生成**严格等于 N 个**关卡（生成前自动清空旧批次，不跨批次累计），每关即时落盘；完成后进度条保持 100% 约 0.8 秒再跳转关卡列表；有超时关卡会以黄色警告提示并在卡片上标注「超时生成失败，已随机生成」
+5. 点击「**生成关卡**」→ 显示**动态进度条**（橙色填充 + 「X/N XX%」+ 超时计数），系统逐关生成**严格等于 N 个**关卡（生成前自动清空旧批次，不跨批次累计；内部两阶段搜索 + 定向调优：静态快速筛选与局部爬山 + 蒙特卡洛精评与精调），每关即时落盘；完成后进度条保持 100% 约 0.8 秒再跳转关卡列表；有超时关卡会以黄色警告提示，卡片标注「未完全命中目标指标等级（最大偏差 X）」
 6. 在关卡列表中：
    - 点击某关卡「开始体验」→ 进入游戏 HUD，可随时点击左侧「难度指标」查看该关卡的 8 项难度指标（使用预计算的初始棋盘快照，不受中途消除影响）
    - 点击「查看记录」→ 打开记录面板查看该关卡的过往通关用时

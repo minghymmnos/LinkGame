@@ -687,7 +687,7 @@ public class UIManager : MonoBehaviour
         if (_genProgressLabel != null)
         {
             if (timeoutCount > 0)
-                _genProgressLabel.text = $"{done} / {total}    {Mathf.RoundToInt(p * 100f)}%    超时兜底 {timeoutCount}";
+                _genProgressLabel.text = $"{done} / {total}    {Mathf.RoundToInt(p * 100f)}%    超时 {timeoutCount}";
             else
                 _genProgressLabel.text = $"{done} / {total}    {Mathf.RoundToInt(p * 100f)}%";
         }
@@ -830,7 +830,7 @@ public class UIManager : MonoBehaviour
                 }
                 else
                 {
-                    resultMsg = $"生成 {generated.Count}/{N} 个关卡完成，其中 {timeoutCount} 个关卡超时（已用当前最优方案兜底，指标可能略低于预期）。建议下一次减小尺寸或调低收敛目标。";
+                    resultMsg = $"生成 {generated.Count}/{N} 个关卡完成，其中 {timeoutCount} 个关卡超时（已返回最接近目标的关卡，指标可能未完全命中目标等级）。";
                     Debug.LogWarning($"[LevelDesigner] {resultMsg}");
                     if (ddPreviewText != null)
                     {
@@ -908,14 +908,14 @@ public class UIManager : MonoBehaviour
             _levelCardObjects.Add(card);
             yAcc += cardH + gap;
 
-            // 文字：关卡编号 / 尺寸 / 类型数 / 综合 DD / 最佳成绩 / 生成状态（超时/失败随机关卡标注）
+            // 文字：关卡编号 / 尺寸 / 类型数 / 综合 DD / 最佳成绩 / 生成状态（超时/未完全达标标注）
             var g = DifficultyAnalyzer.NormalizedValueToGrade(lv.overallDD);
-            string head = $"#{i + 1}  关卡 {lv.id}" + (lv.generationTimedOut ? "  ⚠超时/失败 随机关卡" : "");
+            string head = $"#{i + 1}  关卡 {lv.id}" + (lv.generationTimedOut ? "  ⚠未完全达标" : "");
             string info = $"尺寸 {lv.config.rows}×{lv.config.cols}  类型数 {lv.config.typeCount}";
             string ddStr = $"综合 DD: {lv.overallDD:F3} ({DifficultyGradeUtil.ToName(g)})";
             string best = lv.bestTime > 0 ? $"最佳用时: {lv.bestTime:F2} 秒" : "暂无通关记录";
             string recordsCount = (lv.clearRecords?.Count ?? 0) > 0 ? $"通关次数: {lv.clearRecords.Count}" : "通关次数: 0";
-            // remark：正常关卡为空串不显示；超时失败的随机生成关卡会有中文提示，黄色标注给玩家确认
+            // remark：正常关卡为空串不显示；超时/未完全达标/失败兜底的关卡有中文提示，黄色标注给玩家确认
             string remarkText = !string.IsNullOrEmpty(lv.remark) ? ("状态: " + lv.remark) : string.Empty;
 
             // 文字右侧统一预留 380 像素（右侧按钮区 180 宽 + 左右空距 100），保证不覆盖按钮

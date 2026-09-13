@@ -156,8 +156,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1c32e7ff6f2f3ff4b8087455858eef2c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  gridRows: 6
-  gridCols: 8
+  gridRows: 12
+  gridCols: 12
   tileSize: 0.85
   tileColors:
   - {r: 1, g: 0.3, b: 0.3, a: 1}
@@ -203,6 +203,16 @@ MonoBehaviour:
   - {fileID: 21300000, guid: 76a3023ccc99fa7409c76cb04ac9078c, type: 3}
   - {fileID: 21300000, guid: 71c41e3f73d52ac41b8c968abf7e548d, type: 3}
   - {fileID: 21300000, guid: 2e1c0032e924d54489254c2365d86d33, type: 3}
+  - {fileID: 21300000, guid: ac51f1aa1d68e524cb93f7fc9879b4ac, type: 3}
+  - {fileID: 21300000, guid: a5cb6ef2a3c6e7447a69c1553b52f038, type: 3}
+  - {fileID: 21300000, guid: 4db8593cd89ea3f4b8a60055226fd7b9, type: 3}
+  - {fileID: 21300000, guid: 4d434290e8581e549a367212ec1d7838, type: 3}
+  - {fileID: 21300000, guid: 046025b08603c4d4aa03f4dcb84d0085, type: 3}
+  - {fileID: 21300000, guid: d9c3759689768d74a9b2c7b4cc514df8, type: 3}
+  - {fileID: 21300000, guid: c54180cb116156546bc05ff4db4257b3, type: 3}
+  - {fileID: 21300000, guid: b740851f0c2934a42ac8e12f76cd5ab7, type: 3}
+  - {fileID: 21300000, guid: ab1b872feed200847b96364130e191e3, type: 3}
+  - {fileID: 21300000, guid: 0ba2cf9ac40c4a4468e2edeb134cd00c, type: 3}
 --- !u!4 &276410480
 Transform:
   m_ObjectHideFlags: 0
