@@ -157,6 +157,16 @@ public class LevelInstance
     public List<float> clearRecords;       // 所有通关时间记录（秒）
     public List<string> recordTimestamps;  // 每次通关的记录时间（与 clearRecords 对齐）
 
+    /// <summary>
+    /// 生成该关卡时**实际使用**的 8 个指标目标归一值（长度 8）。
+    /// 注意：与 config.metrics 不同——「按分级」模式在生成时会随机取一个区间内数值，
+    /// 只有此处记录的目标值才能与生成日志（目标 → 实际 → 偏差）完全对应。
+    /// 旧版本存档没有该字段时为空列表，展示端需按 config 兜底估算。
+    /// </summary>
+    public List<float> targetNorms;
+    /// <summary>生成该关卡时实际使用的目标综合 DD（&lt;0 表示旧存档未记录，展示端按 targetNorms 重新预测）。</summary>
+    public float targetDD;
+
     public LevelInstance()
     {
         // —— 关键：所有引用类型字段在构造函数里 new，保证经 PlayerPrefs JSON 反序列化后永不为 null ——
@@ -168,6 +178,8 @@ public class LevelInstance
         gridSnapshot = new List<int>();
         clearRecords = new List<float>();
         recordTimestamps = new List<string>();
+        targetNorms = new List<float>();
+        targetDD = -1f;
         bestTime = -1f;
         _overallDD = 0f;
         generationTimedOut = false;

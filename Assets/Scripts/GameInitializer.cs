@@ -449,12 +449,16 @@ public class GameInitializer : MonoBehaviour
         GameObject recordsListContainer; Text currentRecordLevelLabel;
         GameObject levelDesignPanel, levelSelectorPanel, recordPanel;
         Button recordBackBtn;
+        Button[] metricBatchBtns; Text designMsgText;
+        GameObject metricPanel; Text metricTitle, metricBody; Button metricBackBtn;
         SetupLevelDesignerUI(canvasT, font, out levelDesignPanel, out designT,
             out rowsInput, out colsInput, out typesInput, out genCountInput,
             out metricLabels, out metricInputs, out metricGradeDrops, out metricUseGradeToggles,
             out ddPreviewText, out generateBtn, out genProgressFill, out genProgressLabel, out backToTitleBtn2,
+            out metricBatchBtns, out designMsgText,
             out levelSelectorPanel, out selectorT, out levelListContainer, out backToDesignBtn, out backToTitleBtn3, out refreshListBtn,
-            out recordPanel, out recordsBtn, out recordsCloseBtn, out recordBackBtn, out recordsListContainer, out recordDeleteBtn, out currentRecordLevelLabel);
+            out recordPanel, out recordsBtn, out recordsCloseBtn, out recordBackBtn, out recordsListContainer, out recordDeleteBtn, out currentRecordLevelLabel,
+            out metricPanel, out metricTitle, out metricBody, out metricBackBtn);
 
         uiManager.SetUIReferences(scoreText, timerText, panelObj, overText,
             restartBtn, shuffleBtn, overRestartBtn, botBtn, botBtnText,
@@ -467,7 +471,13 @@ public class GameInitializer : MonoBehaviour
             levelSelectorPanel, levelListContainer, backToDesignBtn, backToTitleBtn3, refreshListBtn,
             recordPanel, recordsBtn, recordsCloseBtn, recordBackBtn, recordsListContainer, recordDeleteBtn, currentRecordLevelLabel,
             pairsText: pairsText,
-            hudBackToTitle: backToTitleBtnInGame);
+            hudBackToTitle: backToTitleBtnInGame,
+            metricBatch: metricBatchBtns,
+            designMsg: designMsgText,
+            metricPanel: metricPanel,
+            metricTitle: metricTitle,
+            metricBody: metricBody,
+            metricBack: metricBackBtn);
     }
 
     /// <summary>
@@ -584,9 +594,9 @@ public class GameInitializer : MonoBehaviour
         rect.anchoredPosition = pos;
         rect.sizeDelta = new Vector2(w, h);
 
-        // 背景
+        // 背景（比面板底色更亮，保证控件边界清晰可见）
         Image bg = obj.AddComponent<Image>();
-        bg.color = new Color(0.12f, 0.12f, 0.18f, 0.95f);
+        bg.color = new Color(0.20f, 0.22f, 0.32f, 0.95f);
 
         InputField input = obj.AddComponent<InputField>();
         input.contentType = InputField.ContentType.IntegerNumber;
@@ -640,8 +650,9 @@ public class GameInitializer : MonoBehaviour
         rect.anchoredPosition = pos;
         rect.sizeDelta = new Vector2(w, h);
 
+        // 背景（与输入框同色系，保证控件边界清晰可见）
         Image bg = obj.AddComponent<Image>();
-        bg.color = new Color(0.12f, 0.12f, 0.18f, 0.95f);
+        bg.color = new Color(0.20f, 0.22f, 0.32f, 0.95f);
 
         Dropdown dd = obj.AddComponent<Dropdown>();
 
@@ -675,49 +686,69 @@ public class GameInitializer : MonoBehaviour
         arrTxt.color = Color.white;
 
         // Template
+        // 注意：Dropdown.Show() 依据模板中 Content / Item 的 rect 高度计算条目间距——
+        //       Content 高度必须等于「单个 Item 高度」，否则会算出多余的底部 padding，
+        //       导致条目位置整体偏移、看起来重叠或列表底部被裁切。
+        const float ITEM_H = 32f;
+        int optCount = Mathf.Max(1, options != null ? options.Count : 1);
+
         GameObject tplObj = new GameObject("Template");
         tplObj.transform.SetParent(obj.transform, false);
         RectTransform tplRect = tplObj.AddComponent<RectTransform>();
         tplRect.anchorMin = new Vector2(0, 0);
         tplRect.anchorMax = new Vector2(1, 0);
         tplRect.pivot = new Vector2(0.5f, 1);
-        tplRect.sizeDelta = new Vector2(0, 180);
+        tplRect.sizeDelta = new Vector2(0, ITEM_H * optCount); // 与选项数量精确匹配
         tplRect.anchoredPosition = new Vector2(0, 0);
         Image tplBg = tplObj.AddComponent<Image>();
-        tplBg.color = new Color(0.08f, 0.08f, 0.12f, 0.98f);
+        tplBg.color = new Color(0.09f, 0.10f, 0.16f, 0.98f);
         tplObj.AddComponent<RectMask2D>();
+        // 此处无需手工添加 Canvas / GraphicRaycaster：Dropdown.SetupTemplate 会自动补上
+        // （overrideSorting + sortingOrder=30000 + 同步父画布 sortingLayerID）；
+        // 手工添加反而会让它跳过 sortingLayerID 同步。
 
-        // Content container
+        // Content container（高度 = 单个 Item 高度）
         GameObject contentObj = new GameObject("Content");
         contentObj.transform.SetParent(tplObj.transform, false);
         RectTransform contentRect = contentObj.AddComponent<RectTransform>();
         contentRect.anchorMin = new Vector2(0, 1);
         contentRect.anchorMax = new Vector2(1, 1);
         contentRect.pivot = new Vector2(0.5f, 1);
-        contentRect.sizeDelta = new Vector2(0, 180);
+        contentRect.sizeDelta = new Vector2(0, ITEM_H);
         contentRect.anchoredPosition = Vector2.zero;
 
-        // Item
+        // Item（选项模板：Dropdown 克隆它并按 ITEM_H 等距排布）
         GameObject itemObj = new GameObject("Item");
         itemObj.transform.SetParent(contentObj.transform, false);
         RectTransform itemRect = itemObj.AddComponent<RectTransform>();
         itemRect.anchorMin = new Vector2(0, 1);
         itemRect.anchorMax = new Vector2(1, 1);
         itemRect.pivot = new Vector2(0.5f, 1);
-        itemRect.sizeDelta = new Vector2(0, 32);
+        itemRect.sizeDelta = new Vector2(0, ITEM_H);
         itemRect.anchoredPosition = Vector2.zero;
         Image itemBg = itemObj.AddComponent<Image>();
-        itemBg.color = new Color(0.15f, 0.15f, 0.22f, 1);
+        itemBg.color = new Color(0.22f, 0.24f, 0.34f, 1f); // 条目底色（比列表底色亮，条目自然分界）
         Toggle itemToggle = itemObj.AddComponent<Toggle>();
+        itemToggle.targetGraphic = itemBg;                 // 悬停/按下高亮由它承担
+        ColorBlock itemColors = itemToggle.colors;
+        itemColors.normalColor = Color.white;
+        itemColors.highlightedColor = new Color(1.45f, 1.45f, 1.45f, 1f);
+        itemColors.pressedColor = new Color(1.7f, 1.7f, 1.7f, 1f);
+        itemColors.selectedColor = Color.white;
+        itemColors.disabledColor = new Color(0.78f, 0.78f, 0.78f, 1f);
+        itemColors.fadeDuration = 0.08f;
+        itemToggle.colors = itemColors;
 
+        // 选中项高亮（Toggle.graphic 仅在 isOn 时显示，用作「当前选项」标记）
         GameObject iBgObj = new GameObject("ItemBackground");
         iBgObj.transform.SetParent(itemObj.transform, false);
         RectTransform iBgRect = iBgObj.AddComponent<RectTransform>();
         iBgRect.anchorMin = Vector2.zero; iBgRect.anchorMax = Vector2.one;
-        iBgRect.offsetMin = Vector2.zero; iBgRect.offsetMax = Vector2.zero;
+        iBgRect.offsetMin = new Vector2(0, 1); // 底部留 1px 间隙 → 相邻条目之间有细分隔线
+        iBgRect.offsetMax = Vector2.zero;
         Image iBg = iBgObj.AddComponent<Image>();
-        iBg.color = new Color(0.3f, 0.4f, 0.9f);
-        itemToggle.targetGraphic = iBg;
+        iBg.color = new Color(0.30f, 0.36f, 0.55f, 0.9f);
+        itemToggle.graphic = iBg;
 
         GameObject iLabelObj = new GameObject("ItemLabel");
         iLabelObj.transform.SetParent(itemObj.transform, false);
@@ -730,7 +761,6 @@ public class GameInitializer : MonoBehaviour
         iLabel.color = Color.white;
         iLabel.alignment = TextAnchor.MiddleLeft;
 
-        itemToggle.graphic = null;
         dd.template = tplRect;
         dd.captionText = lbl;
         dd.itemText = iLabel;
@@ -770,7 +800,7 @@ public class GameInitializer : MonoBehaviour
         ckRect.sizeDelta = new Vector2(h * 0.8f, h * 0.8f);
         ckRect.anchoredPosition = Vector2.zero;
         Image ckBg = ckObj.AddComponent<Image>();
-        ckBg.color = new Color(0.12f, 0.12f, 0.18f, 1);
+        ckBg.color = new Color(0.22f, 0.24f, 0.34f, 1);
 
         Toggle tg = obj.AddComponent<Toggle>();
         tg.targetGraphic = ckBg;
@@ -798,10 +828,11 @@ public class GameInitializer : MonoBehaviour
         out InputField rowsInput, out InputField colsInput, out InputField typesInput, out InputField genCountInput,
         out Text[] metricLabels, out InputField[] metricInputs, out Dropdown[] metricGradeDrops, out Toggle[] metricUseGradeToggles,
         out Text ddPreviewText, out Button generateBtn, out Image genProgressFill, out Text genProgressLabel, out Button backToTitleBtn2,
+        out Button[] metricBatchBtns, out Text designMsgText,
         out GameObject levelSelectorPanel, out Transform selectorT,
         out GameObject levelListContainer, out Button backToDesignBtn, out Button backToTitleBtn3, out Button refreshListBtn,
-        out GameObject recordPanel, out Button recordsBtn, out Button recordsCloseBtn, out Button recordBackBtn,
-        out GameObject recordsListContainer, out Button recordDeleteBtn, out Text currentRecordLevelLabel)
+        out GameObject recordPanel, out Button recordsBtn, out Button recordsCloseBtn, out Button recordBackBtn, out GameObject recordsListContainer, out Button recordDeleteBtn, out Text currentRecordLevelLabel,
+        out GameObject metricPanel, out Text metricTitle, out Text metricBody, out Button metricBackBtn)
     {
         List<string> gradeOptions = new List<string>(DifficultyGradeUtil.GradeNames);
 
@@ -822,6 +853,10 @@ public class GameInitializer : MonoBehaviour
             36, TextAnchor.MiddleCenter, font);
 
         // 基础参数：行/列/类型数/生成数量
+        MakeText("SecBase", designT, "基础参数",
+            new Vector2(0.13f, 0.905f), new Vector2(0.13f, 0.905f), Vector2.zero, 300, 24,
+            18, TextAnchor.MiddleLeft, font).color = new Color(0.65f, 0.85f, 1f);
+
         float baseY = 0.86f;
         MakeText("LblRows", designT, "行数",
             new Vector2(0.15f, baseY), new Vector2(0.15f, baseY), Vector2.zero, 60, 28,
@@ -852,61 +887,112 @@ public class GameInitializer : MonoBehaviour
             new Vector2(0.82f, baseY), new Vector2(0.82f, baseY), Vector2.zero, 80, 32,
             "5", font); genCountInput.text = "5";
 
-        // 8 指标设置：每指标一行，包含 标签 / 数值或分级(切换) / 当前所属分级标签
+        // 8 指标设置：每指标一行，包含 标签 / 调节方式开关 / 数值输入 / 分级下拉 / 当前所属分级
         metricLabels = new Text[8];
         metricInputs = new InputField[8];
         metricGradeDrops = new Dropdown[8];
         metricUseGradeToggles = new Toggle[8];
         string[] labels = DifficultyAnalyzer.MetricLabels;
 
-        // —— 布局 2.0：统一表头在 76% 高，每行 4.5% 步长（8 行共占 36%），
-        //    最后一行指标位于 40%，再空 2% 给 DD 预览行 (ddY=34%)，
-        //    DD 预览底部约 28%，与底部 3 个按钮 (10% 区顶部) 间距 ≈194 像素，无重叠。
+        // —— 布局：表头在 76% 高，每行 4.5% 步长（8 行共占 36%），
+        //    最后一行指标位于 40%，DD 预览行在 34.5%，与底部按钮（10% 区）无重叠。
         const float HEAD_Y = 0.76f;
         const float ROW_STEP = 0.045f;
 
-        // 标题行
-        MakeText("H1", designT, "指标",
-            new Vector2(0.12f, HEAD_Y), new Vector2(0.12f, HEAD_Y), Vector2.zero, 280, 26,
-            18, TextAnchor.MiddleCenter, font);
-        MakeText("H2", designT, "归一化值 [0,1]",
-            new Vector2(0.40f, HEAD_Y), new Vector2(0.40f, HEAD_Y), Vector2.zero, 220, 26,
-            18, TextAnchor.MiddleCenter, font);
-        MakeText("H3", designT, "或按分级随机",
-            new Vector2(0.62f, HEAD_Y), new Vector2(0.62f, HEAD_Y), Vector2.zero, 220, 26,
-            18, TextAnchor.MiddleCenter, font);
-        MakeText("H4", designT, "当前所属分级",
-            new Vector2(0.85f, HEAD_Y), new Vector2(0.85f, HEAD_Y), Vector2.zero, 160, 26,
-            18, TextAnchor.MiddleCenter, font);
+        // 列中心位置：表头与控件一一对齐，便于横向扫读
+        const float COL_LABEL = 0.13f;   // 指标名（左对齐）
+        const float COL_MODE  = 0.325f;  // 调节方式（按分级开关）
+        const float COL_VALUE = 0.44f;   // 归一化值输入框
+        const float COL_GRADE = 0.62f;   // 分级下拉
+        const float COL_CUR   = 0.84f;   // 当前所属分级
+
+        // 区块标题（含二选一说明）
+        MakeText("SecMetrics", designT, "难度指标设置（二选一：勾选「按分级」则数值框自动锁定）",
+            new Vector2(COL_LABEL, 0.805f), new Vector2(COL_LABEL, 0.805f), Vector2.zero, 300, 24,
+            18, TextAnchor.MiddleLeft, font).color = new Color(0.65f, 0.85f, 1f);
+
+        // 表头
+        Color headColor = new Color(0.75f, 0.82f, 0.95f);
+        MakeText("H1", designT, "难度指标",
+            new Vector2(COL_LABEL, HEAD_Y), new Vector2(COL_LABEL, HEAD_Y), Vector2.zero, 300, 26,
+            16, TextAnchor.MiddleLeft, font).color = headColor;
+        MakeText("H2", designT, "调节方式",
+            new Vector2(COL_MODE, HEAD_Y), new Vector2(COL_MODE, HEAD_Y), Vector2.zero, 140, 26,
+            16, TextAnchor.MiddleCenter, font).color = headColor;
+        MakeText("H3", designT, "归一化值 [0,1]",
+            new Vector2(COL_VALUE, HEAD_Y), new Vector2(COL_VALUE, HEAD_Y), Vector2.zero, 170, 26,
+            16, TextAnchor.MiddleCenter, font).color = headColor;
+        MakeText("H4", designT, "按分级随机",
+            new Vector2(COL_GRADE, HEAD_Y), new Vector2(COL_GRADE, HEAD_Y), Vector2.zero, 150, 26,
+            16, TextAnchor.MiddleCenter, font).color = headColor;
+        MakeText("H5", designT, "当前所属分级",
+            new Vector2(COL_CUR, HEAD_Y), new Vector2(COL_CUR, HEAD_Y), Vector2.zero, 180, 26,
+            16, TextAnchor.MiddleCenter, font).color = headColor;
+
+        // 表头下分隔线（视觉分组，不拦截点击）
+        GameObject sepObj = new GameObject("HeaderSep");
+        sepObj.transform.SetParent(designT, false);
+        RectTransform sepRt = sepObj.AddComponent<RectTransform>();
+        sepRt.anchorMin = new Vector2(0.06f, HEAD_Y - 0.024f);
+        sepRt.anchorMax = new Vector2(0.94f, HEAD_Y - 0.024f);
+        sepRt.sizeDelta = new Vector2(0, 2);
+        sepRt.anchoredPosition = Vector2.zero;
+        Image sepImg = sepObj.AddComponent<Image>();
+        sepImg.color = new Color(0.6f, 0.7f, 0.9f, 0.35f);
+        sepImg.raycastTarget = false;
 
         for (int i = 0; i < 8; i++)
         {
             float y = HEAD_Y - ROW_STEP * (i + 1);
-            metricLabels[i] = MakeText($"Label_{i}", designT, labels[i],
-                new Vector2(0.12f, y), new Vector2(0.12f, y), Vector2.zero, 280, 30,
-                16, TextAnchor.MiddleCenter, font);
 
-            // 数值输入框（默认模式）
+            // 斑马纹行底色：隔行深浅交替，便于横向对齐读取（不拦截点击）
+            // 注意：必须在所有行控件之前创建，否则会盖住展开的分级下拉列表
+            GameObject rowBgObj = new GameObject($"RowBg_{i}");
+            rowBgObj.transform.SetParent(designT, false);
+            RectTransform rbRt = rowBgObj.AddComponent<RectTransform>();
+            rbRt.anchorMin = new Vector2(0.06f, y);
+            rbRt.anchorMax = new Vector2(0.94f, y);
+            rbRt.sizeDelta = new Vector2(0, 30);
+            rbRt.anchoredPosition = Vector2.zero;
+            Image rbImg = rowBgObj.AddComponent<Image>();
+            rbImg.color = (i % 2 == 0)
+                ? new Color(0.20f, 0.20f, 0.30f, 0.45f)
+                : new Color(0.14f, 0.14f, 0.22f, 0.45f);
+            rbImg.raycastTarget = false;
+        }
+
+        for (int i = 0; i < 8; i++)
+        {
+            float y = HEAD_Y - ROW_STEP * (i + 1);
+
+            metricLabels[i] = MakeText($"Label_{i}", designT, labels[i],
+                new Vector2(COL_LABEL, y), new Vector2(COL_LABEL, y), Vector2.zero, 300, 30,
+                16, TextAnchor.MiddleLeft, font);
+
+            // 调节方式开关（勾选 = 按分级；不勾选 = 按数值）
+            metricUseGradeToggles[i] = MakeToggle($"UseGrade_{i}", designT,
+                new Vector2(COL_MODE, y), new Vector2(COL_MODE, y), Vector2.zero, 140, 30,
+                "按分级", font);
+
+            // 数值输入框（默认模式，默认值 0.5）
             metricInputs[i] = MakeInputField($"MetricVal_{i}", designT,
-                new Vector2(0.40f, y), new Vector2(0.40f, y), Vector2.zero, 160, 30,
-                "0.50", font, 16);
-            metricInputs[i].text = "0.50";
+                new Vector2(COL_VALUE, y), new Vector2(COL_VALUE, y), Vector2.zero, 150, 30,
+                "0.5", font, 16);
+            // 顺序很关键：必须先切到 DecimalNumber（把字符校验规则从 Integer 改为 Decimal），
+            // 再写 text。InputField.SetText 会逐字符调用 Validate，Integer 规则会丢弃小数点，
+            // 导致 "0.5" 显示成 "05"（旧代码把 text 写在 contentType 之前，即此坑）。
             metricInputs[i].contentType = InputField.ContentType.DecimalNumber;
             metricInputs[i].characterLimit = 6;
+            metricInputs[i].text = "0.5";
 
             // 分级下拉框（启用 useGrade 后生效）
             metricGradeDrops[i] = MakeDropdown($"MetricGrade_{i}", designT,
-                new Vector2(0.62f, y), new Vector2(0.62f, y), Vector2.zero, 160, 30,
+                new Vector2(COL_GRADE, y), new Vector2(COL_GRADE, y), Vector2.zero, 150, 30,
                 gradeOptions, font, 16);
-
-            // Toggle：切换使用分级还是数值
-            metricUseGradeToggles[i] = MakeToggle($"UseGrade_{i}", designT,
-                new Vector2(0.30f, y), new Vector2(0.30f, y), Vector2.zero, 110, 30,
-                "按分级", font);
 
             // 当前所属分级显示（自动更新，只读）
             MakeText($"CurGrade_{i}", designT, "普通",
-                new Vector2(0.85f, y), new Vector2(0.85f, y), Vector2.zero, 140, 30,
+                new Vector2(COL_CUR, y), new Vector2(COL_CUR, y), Vector2.zero, 180, 30,
                 16, TextAnchor.MiddleCenter, font);
         }
 
@@ -918,6 +1004,33 @@ public class GameInitializer : MonoBehaviour
         ddPreviewText = MakeText("DD_Value", designT, "0.500  (普通)",
             new Vector2(0.58f, ddY), new Vector2(0.58f, ddY), Vector2.zero, 360, 32,
             24, TextAnchor.MiddleLeft, font);
+
+        // —— 批量操作：一次性把 8 个指标统一切换 / 重置。
+        //    位于 DD 预览（34.5%）与底部按钮（10%）之间的空白区，不与任何控件重叠。
+        MakeText("BatchLabel", designT, "批量操作：",
+            new Vector2(0.13f, 0.255f), new Vector2(0.13f, 0.255f), Vector2.zero, 200, 34,
+            16, TextAnchor.MiddleLeft, font).color = new Color(0.75f, 0.82f, 0.95f);
+
+        metricBatchBtns = new Button[3];
+        metricBatchBtns[0] = MakeButton("BatchValueBtn", designT,
+            new Vector2(0.23f, 0.255f), new Vector2(0.23f, 0.255f), Vector2.zero, 190, 34,
+            "全部按数值", font);
+        metricBatchBtns[0].GetComponent<Image>().color = new Color(0.30f, 0.60f, 1f);
+
+        metricBatchBtns[1] = MakeButton("BatchGradeBtn", designT,
+            new Vector2(0.35f, 0.255f), new Vector2(0.35f, 0.255f), Vector2.zero, 190, 34,
+            "全部按分级", font);
+        metricBatchBtns[1].GetComponent<Image>().color = new Color(0.45f, 0.42f, 0.90f);
+
+        metricBatchBtns[2] = MakeButton("BatchResetBtn", designT,
+            new Vector2(0.46f, 0.255f), new Vector2(0.46f, 0.255f), Vector2.zero, 170, 34,
+            "重置默认", font);
+        metricBatchBtns[2].GetComponent<Image>().color = new Color(0.52f, 0.52f, 0.60f);
+
+        // —— 独立提示 / 校验 / 结果信息区（与 DD 预览分离，避免生成结果把 DD 数值覆盖掉）
+        designMsgText = MakeText("DesignMsg", designT, "",
+            new Vector2(0.5f, 0.185f), new Vector2(0.5f, 0.185f), Vector2.zero, 1500, 30,
+            17, TextAnchor.MiddleCenter, font);
 
         // 生成关卡按钮（底部偏中）
         generateBtn = MakeButton("GenerateLevelsBtn", designT,
@@ -1103,5 +1216,36 @@ public class GameInitializer : MonoBehaviour
             new Vector2(0.75f, 0.10f), new Vector2(0.75f, 0.10f), Vector2.zero, 200, 44,
             "关闭", font);
         recordsCloseBtn.GetComponent<Image>().color = new Color(0.5f, 0.5f, 0.55f);
+
+        // ========================== MetricReportPanel（关卡指标生成报告） ==========================
+        // 由关卡列表卡片上的「指标报告」按钮打开：展示该关卡 8 指标「目标 → 实际 → 偏差」，
+        // 内容与生成关卡时的控制台日志一致。默认隐藏。
+        metricPanel = new GameObject("MetricReportPanel");
+        metricPanel.transform.SetParent(canvasT, false);
+        RectTransform mrR = metricPanel.AddComponent<RectTransform>();
+        mrR.anchorMin = Vector2.zero; mrR.anchorMax = Vector2.one;
+        mrR.offsetMin = Vector2.zero; mrR.offsetMax = Vector2.zero;
+        Image mrBg = metricPanel.AddComponent<Image>();
+        mrBg.color = new Color(0.06f, 0.06f, 0.12f, 0.97f);
+        metricPanel.SetActive(false);
+        Transform mrT = metricPanel.transform;
+
+        // 标题（运行时写入：关卡编号 / 尺寸 / 类型数 / 综合 DD 与等级）
+        metricTitle = MakeText("MetricTitle", mrT, "关卡指标生成报告",
+            new Vector2(0.5f, 0.93f), new Vector2(0.5f, 0.93f), Vector2.zero, 1700, 40,
+            26, TextAnchor.MiddleCenter, font);
+        metricTitle.color = new Color(0.85f, 0.92f, 1f);
+
+        // 报告正文：多行左对齐；pivot 置顶，从 (0.5, 0.86) 向下排版
+        metricBody = MakeText("MetricBody", mrT, "",
+            new Vector2(0.5f, 0.86f), new Vector2(0.5f, 0.86f), Vector2.zero, 1660, 720,
+            20, TextAnchor.UpperLeft, font);
+        metricBody.rectTransform.pivot = new Vector2(0.5f, 1f);
+        metricBody.rectTransform.anchoredPosition = Vector2.zero;
+
+        metricBackBtn = MakeButton("MetricBackBtn", mrT,
+            new Vector2(0.5f, 0.09f), new Vector2(0.5f, 0.09f), Vector2.zero, 240, 46,
+            "返回关卡列表", font);
+        metricBackBtn.GetComponent<Image>().color = new Color(0.30f, 0.68f, 0.62f);
     }
 }

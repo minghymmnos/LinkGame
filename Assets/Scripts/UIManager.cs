@@ -48,10 +48,14 @@ public class UIManager : MonoBehaviour
     private Dropdown[] metricGradeDrops;     // 8 指标分级下拉
     private Toggle[] metricUseGradeToggles;  // 8 指标「按分级」Toggle
     private Text ddPreviewText;              // 综合 DD 预览文字
-    private Button generateBtn;              // 生成关卡按钮
+    private Button generateBtn;              // 生成关卡按钮（生成期间切换为「取消生成」）
     private Image _genProgressFill;          // 生成进度条：橙色填充图（FillMethod=Horizontal）
     private Text _genProgressLabel;          // 生成进度条：百分比/进度文字
     private GameObject _genProgressBar;      // 生成进度条：根容器（用于显隐）
+    private Button[] metricBatchBtns;         // 批量操作：[0]全部按数值 [1]全部按分级 [2]重置默认
+    private Text designMsgText;              // 独立的提示/校验/结果信息区（避免挤占 DD 预览）
+    private bool _isGenerating;              // 是否正在生成关卡
+    private bool _genCancelled;              // 生成过程是否被玩家取消
     private Button backToTitleBtn2;          // 关卡设计→返回标题
     private Button backToTitleBtnInGame;     // 常规游玩界面右上角「返回标题」，一键退出当前局回到标题页
     private Button recordsBtn;               // 打开记录面板按钮
@@ -70,6 +74,12 @@ public class UIManager : MonoBehaviour
     private GameObject recordsListContainer;
     private Button recordDeleteBtn;
     private Text currentRecordLevelLabel;
+
+    // 关卡指标报告面板（关卡列表卡片「指标报告」按钮打开：展示该关卡 8 指标实际值 vs 生成目标 + 偏差）
+    private GameObject metricReportPanel;
+    private Text metricReportTitleText;
+    private Text metricReportBodyText;
+    private Button metricReportBackBtn;
 
     // 当前在记录面板中被选中的记录索引
     private LevelInstance _currentRecordLevel;
@@ -119,7 +129,13 @@ public class UIManager : MonoBehaviour
         GameObject recPanel, Button recBtn, Button recClose, Button recBack,
         GameObject recList, Button recDel, Text recLevelLabel,
         Text pairsText = null,
-        Button hudBackToTitle = null)
+        Button hudBackToTitle = null,
+        Button[] metricBatch = null,
+        Text designMsg = null,
+        GameObject metricPanel = null,
+        Text metricTitle = null,
+        Text metricBody = null,
+        Button metricBack = null)
     {
         scoreText = score;
         timerText = timer;
@@ -152,6 +168,8 @@ public class UIManager : MonoBehaviour
         _genProgressLabel = genProgLabel;
         if (_genProgressFill != null) _genProgressBar = _genProgressFill.transform.parent.gameObject;
         if (_genProgressBar != null) _genProgressBar.SetActive(false);
+        metricBatchBtns = metricBatch;
+        designMsgText = designMsg;
         backToTitleBtn2 = back2;
         recordsBtn = recBtn;
 
@@ -167,6 +185,12 @@ public class UIManager : MonoBehaviour
         recordsListContainer = recList;
         recordDeleteBtn = recDel;
         currentRecordLevelLabel = recLevelLabel;
+
+        metricReportPanel = metricPanel;
+        metricReportTitleText = metricTitle;
+        metricReportBodyText = metricBody;
+        metricReportBackBtn = metricBack;
+        if (metricReportPanel != null) metricReportPanel.SetActive(false);
 
         // ---------- 绑定基础按钮事件 ----------
         if (restartButton != null) restartButton.onClick.AddListener(OnRestartClicked);
@@ -193,6 +217,8 @@ public class UIManager : MonoBehaviour
         if (recordsCloseBtn != null) recordsCloseBtn.onClick.AddListener(() => recordPanel.SetActive(false));
         if (recordBackBtn != null) recordBackBtn.onClick.AddListener(() => recordPanel.SetActive(false));
         if (recordDeleteBtn != null) recordDeleteBtn.onClick.AddListener(OnDeleteSelectedRecord);
+        // 指标报告面板：返回按钮 = 关闭报告并回到关卡列表
+        if (metricReportBackBtn != null) metricReportBackBtn.onClick.AddListener(OpenLevelSelector);
 
         // ---------- 8 指标双向联动绑定 ----------
         if (metricInputs != null && metricGradeDrops != null && metricUseGradeToggles != null)
@@ -213,12 +239,26 @@ public class UIManager : MonoBehaviour
                     metricUseGradeToggles[idx].onValueChanged.AddListener(_ => OnMetricToggleChanged(idx));
                 }
             }
+            // 初始状态：两种调节方式互斥（默认「按数值」模式，分级下拉锁定变暗）
+            ApplyAllMetricModes();
         }
 
-        // 基础参数变化时同步刷新 DD 预览
-        if (rowsInput != null) rowsInput.onValueChanged.AddListener(_ => RefreshDDPreview());
-        if (colsInput != null) colsInput.onValueChanged.AddListener(_ => RefreshDDPreview());
-        if (typesInput != null) typesInput.onValueChanged.AddListener(_ => RefreshDDPreview());
+        // 基础参数变化时同步刷新 DD 预览 + 各指标的可达性标红（方案4）+ 实时参数校验
+        if (rowsInput != null) rowsInput.onValueChanged.AddListener(_ => OnBaseParamChanged());
+        if (colsInput != null) colsInput.onValueChanged.AddListener(_ => OnBaseParamChanged());
+        if (typesInput != null) typesInput.onValueChanged.AddListener(_ => OnBaseParamChanged());
+        if (genCountInput != null) genCountInput.onValueChanged.AddListener(_ => OnBaseParamChanged());
+
+        // 指标批量操作按钮：全部按数值 / 全部按分级 / 重置默认
+        if (metricBatchBtns != null)
+        {
+            if (metricBatchBtns.Length > 0 && metricBatchBtns[0] != null)
+                metricBatchBtns[0].onClick.AddListener(() => SetAllMetricMode(false));
+            if (metricBatchBtns.Length > 1 && metricBatchBtns[1] != null)
+                metricBatchBtns[1].onClick.AddListener(() => SetAllMetricMode(true));
+            if (metricBatchBtns.Length > 2 && metricBatchBtns[2] != null)
+                metricBatchBtns[2].onClick.AddListener(ResetAllMetrics);
+        }
 
         // 游戏通关事件：自动写记录
         if (GameController.Instance != null)
@@ -258,6 +298,7 @@ public class UIManager : MonoBehaviour
         if (levelDesignPanel != null) levelDesignPanel.SetActive(false);
         if (levelSelectorPanel != null) levelSelectorPanel.SetActive(false);
         if (recordPanel != null) recordPanel.SetActive(false);
+        if (metricReportPanel != null) metricReportPanel.SetActive(false);
     }
 
     /// <summary>打开关卡设计面板（隐藏其他非游戏 HUD 面板）。</summary>
@@ -267,8 +308,12 @@ public class UIManager : MonoBehaviour
         if (gameHud != null) gameHud.SetActive(false);
         if (levelSelectorPanel != null) levelSelectorPanel.SetActive(false);
         if (recordPanel != null) recordPanel.SetActive(false);
+        if (metricReportPanel != null) metricReportPanel.SetActive(false);
         if (levelDesignPanel != null) levelDesignPanel.SetActive(true);
+        ApplyAllMetricModes();   // 重开面板时重新对齐互斥状态
+        RefreshAllMetricLabels();
         RefreshDDPreview();
+        SetDesignMessage(null, Color.white);   // 清空上一次的提示/校验信息
     }
 
     /// <summary>打开关卡列表面板。</summary>
@@ -278,8 +323,48 @@ public class UIManager : MonoBehaviour
         if (gameHud != null) gameHud.SetActive(false);
         if (levelDesignPanel != null) levelDesignPanel.SetActive(false);
         if (recordPanel != null) recordPanel.SetActive(false);
+        if (metricReportPanel != null) metricReportPanel.SetActive(false);
         if (levelSelectorPanel != null) levelSelectorPanel.SetActive(true);
         RebuildLevelList();
+    }
+
+    /// <summary>
+    /// 打开「关卡指标报告」面板：展示该关卡 8 个指标的**实际值 vs 生成时目标值 + 偏差**，
+    /// 内容与生成关卡时控制台输出的日志一致（数据来自 LevelGenerator.GetMetricReport）。
+    /// </summary>
+    private void ShowMetricReport(string levelId)
+    {
+        if (metricReportPanel == null)
+        {
+            Debug.LogWarning("[ShowMetricReport] 指标报告面板未创建（GameInitializer 未传入 metricPanel），已忽略。");
+            return;
+        }
+        if (LevelRecordManager.Instance == null) return;
+        var lv = LevelRecordManager.Instance.FindLevel(levelId);
+        if (lv == null)
+        {
+            Debug.LogWarning($"[ShowMetricReport] 找不到关卡：levelId={levelId}");
+            return;
+        }
+
+        if (metricReportTitleText != null)
+        {
+            var g = DifficultyAnalyzer.NormalizedValueToGrade(lv.overallDD);
+            string status = lv.generationTimedOut ? "   ⚠未完全达标" : "";
+            metricReportTitleText.text =
+                $"关卡 {lv.id}   尺寸 {lv.config.rows}×{lv.config.cols}   类型数 {lv.config.typeCount}   " +
+                $"综合 DD {lv.overallDD:F3} ({DifficultyGradeUtil.ToName(g)}){status}";
+        }
+        if (metricReportBodyText != null)
+            metricReportBodyText.text = LevelGenerator.GetMetricReport(lv);
+
+        // 面板互斥显示：报告面板盖住关卡列表
+        if (titlePanel != null) titlePanel.SetActive(false);
+        if (gameHud != null) gameHud.SetActive(false);
+        if (levelDesignPanel != null) levelDesignPanel.SetActive(false);
+        if (recordPanel != null) recordPanel.SetActive(false);
+        if (levelSelectorPanel != null) levelSelectorPanel.SetActive(false);
+        metricReportPanel.SetActive(true);
     }
 
     /// <summary>
@@ -558,11 +643,74 @@ public class UIManager : MonoBehaviour
             if (txt != null)
             {
                 var g = DifficultyAnalyzer.NormalizedValueToGrade(v);
-                txt.text = DifficultyGradeUtil.ToName(g);
-                Color c = DifficultyGradeUtil.ToColor(g);
-                txt.color = new Color(c.r, c.g, c.b, 1f);
+                // 方案4：显式设置但当前尺寸/类型数下不可达 → 标红提示
+                bool unreachable = IsMetricExplicit(i) && !IsMetricReachable(i);
+                if (unreachable)
+                {
+                    txt.text = DifficultyGradeUtil.ToName(g) + " ✕不可达";
+                    txt.color = new Color(0.95f, 0.30f, 0.30f, 1f);
+                }
+                else
+                {
+                    txt.text = DifficultyGradeUtil.ToName(g);
+                    Color c = DifficultyGradeUtil.ToColor(g);
+                    txt.color = new Color(c.r, c.g, c.b, 1f);
+                }
             }
         }
+    }
+
+    /// <summary>刷新全部 8 个指标的 CurGrade 标签（含"✕不可达"标红，方案4）。行列/类型数变化时调用。</summary>
+    private void RefreshAllMetricLabels()
+    {
+        if (metricInputs == null) return;
+        for (int i = 0; i < 8 && i < metricInputs.Length; i++)
+        {
+            if (metricInputs[i] == null) continue;
+            UpdateCurGradeLabel(i, GetMetricNormValue(i));
+        }
+    }
+
+    /// <summary>读取当前 UI 的基础参数（行/列/类型数，已做范围钳制，与 BuildConfigFromUI 一致）。</summary>
+    private void GetCurrentGridParams(out int R, out int C, out int T)
+    {
+        if (!int.TryParse(rowsInput?.text ?? "", out R)) R = 8;
+        if (!int.TryParse(colsInput?.text ?? "", out C)) C = 10;
+        if (!int.TryParse(typesInput?.text ?? "", out T)) T = 8;
+        R = Mathf.Max(2, Mathf.Min(20, R));
+        C = Mathf.Max(2, Mathf.Min(20, C));
+        T = Mathf.Max(2, Mathf.Min(64, T));
+    }
+
+    /// <summary>判断第 i 个指标是否为"显式设置"（开启按分级，或数值偏离默认 0.5）。</summary>
+    private bool IsMetricExplicit(int i)
+    {
+        bool useGrade = metricUseGradeToggles != null && metricUseGradeToggles[i] != null && metricUseGradeToggles[i].isOn;
+        if (useGrade) return true;
+        return Mathf.Abs(GetMetricNormValue(i) - 0.5f) > 0.001f;
+    }
+
+    /// <summary>判断第 i 个指标的当前设置（按分级=等级区间；按数值=精确值）在当前尺寸/类型数下是否可达（方案4）。</summary>
+    private bool IsMetricReachable(int i)
+    {
+        GetCurrentGridParams(out int R, out int C, out int T);
+        float[,] ranges = LevelGenerator.EstimateReachableRanges(R, C, T);
+        if (ranges == null) return true;
+
+        float lo, hi;
+        bool useGrade = metricUseGradeToggles != null && metricUseGradeToggles[i] != null && metricUseGradeToggles[i].isOn;
+        if (useGrade)
+        {
+            int gi = Mathf.Clamp(metricGradeDrops[i] != null ? metricGradeDrops[i].value : 0, 0, 4);
+            lo = DifficultyGradeUtil.GradeLower[gi];
+            hi = (gi == 4) ? 1f : DifficultyGradeUtil.GradeUpper[gi];
+        }
+        else
+        {
+            lo = hi = GetMetricNormValue(i);
+        }
+        const float eps = 0.02f;
+        return (hi + eps) >= ranges[i, 0] && (lo - eps) <= ranges[i, 1];
     }
 
     /// <summary>指标数值输入框值变化 → 更新分级显示 → 刷新综合 DD。</summary>
@@ -582,22 +730,192 @@ public class UIManager : MonoBehaviour
         if (!metricUseGradeToggles[i].isOn) return; // 数值模式：不干涉
         var g = (DifficultyGrade)metricGradeDrops[i].value;
         float v = DifficultyAnalyzer.GradeToRandomNormalized(g);
-        if (metricInputs[i] != null) metricInputs[i].text = v.ToString("F3");
+        if (metricInputs[i] != null) metricInputs[i].text = FormatNorm(v);
         UpdateCurGradeLabel(i, v);
         RefreshDDPreview();
+    }
+
+    /// <summary>设置 Graphic 的透明度（保留原有 RGB）。</summary>
+    private static void SetGraphicAlpha(Graphic g, float a)
+    {
+        if (g == null) return;
+        Color c = g.color;
+        c.a = a;
+        g.color = c;
+    }
+
+    /// <summary>
+    /// 归一化指标值的显示格式：最多 3 位小数并去掉无意义的尾随 0（0.5 而不是 0.500，1.0 保留一位小数）。
+    /// </summary>
+    private static string FormatNorm(float v)
+    {
+        return v.ToString("0.0##");
+    }
+
+    /// <summary>
+    /// 应用第 i 个指标的调节方式（方案：两种调节方式互斥）。
+    /// useGrade=true → 启用「按分级」下拉、锁定「归一化值」输入框；
+    /// useGrade=false → 反之。被锁定的一方同时降低透明度，直观表明当前生效的方式。
+    /// </summary>
+    private void ApplyMetricMode(int i, bool useGrade)
+    {
+        if (metricInputs == null || metricGradeDrops == null) return;
+        if (i < 0 || i >= metricInputs.Length || i >= metricGradeDrops.Length) return;
+
+        // 归一化值输入框：分级模式下禁用并变暗
+        InputField input = metricInputs[i];
+        if (input != null)
+        {
+            // 关闭 Selectable 自带的 disabled 着色，避免与下方显式透明度叠加导致过暗
+            ColorBlock icb = input.colors; icb.disabledColor = Color.white; input.colors = icb;
+            input.interactable = !useGrade;
+            SetGraphicAlpha(input.GetComponent<Image>(), useGrade ? 0.35f : 0.95f);
+            SetGraphicAlpha(input.textComponent, useGrade ? 0.35f : 1f);
+            SetGraphicAlpha(input.placeholder, useGrade ? 0.25f : 0.4f);
+        }
+
+        // 分级下拉框：数值模式下禁用并变暗
+        Dropdown drop = metricGradeDrops[i];
+        if (drop != null)
+        {
+            ColorBlock dcb = drop.colors; dcb.disabledColor = Color.white; drop.colors = dcb;
+            drop.interactable = useGrade;
+            SetGraphicAlpha(drop.GetComponent<Image>(), useGrade ? 0.95f : 0.35f);
+            SetGraphicAlpha(drop.captionText, useGrade ? 1f : 0.35f);
+            Transform arrow = drop.transform.Find("Arrow");
+            if (arrow != null) SetGraphicAlpha(arrow.GetComponent<Graphic>(), useGrade ? 1f : 0.25f);
+        }
+    }
+
+    /// <summary>按各指标 Toggle 的当前状态，批量应用互斥的调节方式（初始化 / 重开面板时调用）。</summary>
+    private void ApplyAllMetricModes()
+    {
+        if (metricUseGradeToggles == null) return;
+        for (int i = 0; i < 8 && i < metricUseGradeToggles.Length; i++)
+        {
+            bool on = metricUseGradeToggles[i] != null && metricUseGradeToggles[i].isOn;
+            ApplyMetricMode(i, on);
+        }
+    }
+
+    /// <summary>批量把 8 个指标切换为「按数值」（useGrade=false）或「按分级」（useGrade=true）。</summary>
+    private void SetAllMetricMode(bool useGrade)
+    {
+        if (metricUseGradeToggles == null) return;
+        for (int i = 0; i < 8 && i < metricUseGradeToggles.Length; i++)
+        {
+            // 仅在值发生变化时才会触发 OnValueChanged，因此循环后统一再套用一次
+            if (metricUseGradeToggles[i] != null) metricUseGradeToggles[i].isOn = useGrade;
+        }
+        ApplyAllMetricModes();
+        RefreshAllMetricLabels();
+        RefreshDDPreview();
+        SetDesignMessage(useGrade
+            ? "已将 8 个指标全部切换为「按分级」（下拉在各自分级区间内随机取值）。"
+            : "已将 8 个指标全部切换为「按数值」（可手动输入 0~1）。",
+            new Color(0.60f, 0.85f, 1f));
+    }
+
+    /// <summary>把 8 个指标重置为默认：「按数值」模式 + 0.5。</summary>
+    private void ResetAllMetrics()
+    {
+        if (metricInputs == null || metricUseGradeToggles == null) return;
+        for (int i = 0; i < 8; i++)
+        {
+            if (metricUseGradeToggles[i] != null) metricUseGradeToggles[i].isOn = false;
+            if (metricGradeDrops != null && i < metricGradeDrops.Length && metricGradeDrops[i] != null)
+                metricGradeDrops[i].value = 0;
+            if (metricInputs[i] != null) metricInputs[i].text = "0.5";
+        }
+        ApplyAllMetricModes();
+        RefreshAllMetricLabels();
+        RefreshDDPreview();
+        SetDesignMessage("已将 8 个指标重置为默认（按数值 0.5）。", new Color(0.60f, 0.85f, 1f));
+    }
+
+    /// <summary>写入独立的提示/校验/结果信息区（msg 为空表示清空）。</summary>
+    private void SetDesignMessage(string msg, Color color)
+    {
+        if (designMsgText == null) return;
+        designMsgText.text = string.IsNullOrEmpty(msg) ? "" : msg;
+        designMsgText.color = color;
+    }
+
+    /// <summary>把输入框文字标红（参数非法提示）。</summary>
+    private static void MarkInputInvalid(InputField f)
+    {
+        if (f != null && f.textComponent != null) f.textComponent.color = new Color(1f, 0.45f, 0.45f);
+    }
+
+    /// <summary>恢复输入框文字为白色（参数合法）。</summary>
+    private static void MarkInputValid(InputField f)
+    {
+        if (f != null && f.textComponent != null) f.textComponent.color = Color.white;
+    }
+
+    /// <summary>
+    /// 校验基础参数是否合法（行 2~20 / 列 2~20 / 类型 2~64 / 数量 1~50，且行×列为偶数）。
+    /// </summary>
+    /// <param name="live">true = 输入过程中的实时校验：解析失败不报错（避免边输边弹提示）</param>
+    private bool ValidateBaseParams(out string err, bool live = false)
+    {
+        err = null;
+        MarkInputValid(rowsInput); MarkInputValid(colsInput); MarkInputValid(typesInput); MarkInputValid(genCountInput);
+
+        if (!int.TryParse(rowsInput?.text ?? "", out int R))
+        { if (live) return true; MarkInputInvalid(rowsInput); err = "行数必须是数字。"; return false; }
+        if (!int.TryParse(colsInput?.text ?? "", out int C))
+        { if (live) return true; MarkInputInvalid(colsInput); err = "列数必须是数字。"; return false; }
+        if (!int.TryParse(typesInput?.text ?? "", out int T))
+        { if (live) return true; MarkInputInvalid(typesInput); err = "配对类型数必须是数字。"; return false; }
+        if (!int.TryParse(genCountInput?.text ?? "", out int N))
+        { if (live) return true; MarkInputInvalid(genCountInput); err = "生成数量必须是数字。"; return false; }
+
+        if (R < 2 || R > 20) { MarkInputInvalid(rowsInput); err = $"行数需在 2~20 之间（当前 {R}）。"; return false; }
+        if (C < 2 || C > 20) { MarkInputInvalid(colsInput); err = $"列数需在 2~20 之间（当前 {C}）。"; return false; }
+        if (T < 2 || T > 64) { MarkInputInvalid(typesInput); err = $"配对类型数需在 2~64 之间（当前 {T}）。"; return false; }
+        if (N < 1 || N > 50) { MarkInputInvalid(genCountInput); err = $"生成数量需在 1~50 之间（当前 {N}）。"; return false; }
+        if ((R * C) % 2 != 0)
+        {
+            MarkInputInvalid(rowsInput); MarkInputInvalid(colsInput);
+            err = $"行数×列数必须为偶数（当前 {R}×{C}={R * C}），否则无法两两配对。";
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>基础参数变化：刷新 DD 预览与可达性标红，并做实时合法性校验。</summary>
+    private void OnBaseParamChanged()
+    {
+        RefreshDDPreview();
+        RefreshAllMetricLabels();
+        SetDesignMessage(null, Color.white); // 先清空，再按校验结果重新写入
+        string err;
+        if (!ValidateBaseParams(out err, live: true) && !string.IsNullOrEmpty(err))
+            SetDesignMessage("⚠ " + err, new Color(0.95f, 0.62f, 0.25f));
+    }
+
+    /// <summary>切换生成按钮的形态：生成中显示红色「取消生成」，否则显示橙色「生成关卡」。</summary>
+    private void SetGenerateButtonState(bool generating)
+    {
+        if (generateBtn == null) return;
+        Text label = generateBtn.GetComponentInChildren<Text>();
+        if (label != null) label.text = generating ? "取消生成" : "生成关卡";
+        Image img = generateBtn.GetComponent<Image>();
+        if (img != null) img.color = generating ? new Color(0.85f, 0.33f, 0.28f) : new Color(0.9f, 0.55f, 0.15f);
+        generateBtn.interactable = true; // 生成期间仍可点击（用于取消）
     }
 
     /// <summary>按分级 Toggle 切换：启用分级模式时立即按当前下拉生成值。</summary>
     private void OnMetricToggleChanged(int i)
     {
         bool on = metricUseGradeToggles[i].isOn;
-        if (metricGradeDrops[i] != null) metricGradeDrops[i].interactable = on;
-        if (metricInputs[i] != null) metricInputs[i].interactable = !on;
+        ApplyMetricMode(i, on);   // 互斥：启用一方即锁定另一方
         if (on)
         {
             var g = (DifficultyGrade)metricGradeDrops[i].value;
             float v = DifficultyAnalyzer.GradeToRandomNormalized(g);
-            metricInputs[i].text = v.ToString("F3");
+            if (metricInputs[i] != null) metricInputs[i].text = FormatNorm(v);
             UpdateCurGradeLabel(i, v);
         }
         else
@@ -646,7 +964,7 @@ public class UIManager : MonoBehaviour
         return cfg;
     }
 
-    /// <summary>根据当前 UI 输入，实时计算综合 DD 并刷新预览文本。</summary>
+    /// <summary>根据当前 UI 输入，实时计算综合 DD 并刷新预览文本；同时提示不可达指标数量（方案4）。</summary>
     private void RefreshDDPreview()
     {
         if (ddPreviewText == null) return;
@@ -656,9 +974,21 @@ public class UIManager : MonoBehaviour
             float[] norms = DifficultyAnalyzer.ResolveTargetNorms(cfg);
             float dd = DifficultyAnalyzer.PredictOverallDD(cfg.rows, cfg.cols, cfg.typeCount, norms);
             var g = DifficultyAnalyzer.NormalizedValueToGrade(dd);
-            ddPreviewText.text = $"{dd:F3}  ({DifficultyGradeUtil.ToName(g)})";
-            var gc = DifficultyGradeUtil.ToColor(g);
-            ddPreviewText.color = new Color(gc.r, gc.g, gc.b, 1f);
+
+            // 方案4：统计"显式设置但当前尺寸/类型数下不可达"的指标数量
+            int badCount = LevelGenerator.CountUnreachableExplicit(cfg);
+            string warn = badCount > 0 ? $"   ⚠{badCount}项不可达" : "";
+            ddPreviewText.text = $"{dd:F3}  ({DifficultyGradeUtil.ToName(g)}){warn}";
+
+            if (badCount > 0)
+            {
+                ddPreviewText.color = new Color(0.95f, 0.75f, 0.20f); // 橙黄警告
+            }
+            else
+            {
+                var gc = DifficultyGradeUtil.ToColor(g);
+                ddPreviewText.color = new Color(gc.r, gc.g, gc.b, 1f);
+            }
         }
         catch (Exception e)
         {
@@ -671,9 +1001,50 @@ public class UIManager : MonoBehaviour
     // 生成关卡 + 关卡列表渲染
     // ================================================================
 
-    /// <summary>「生成关卡」按钮：启动协程 CoGenerateLevels 逐关生成 + 动态进度条（非阻塞 UI）。</summary>
+    /// <summary>
+    /// 「生成关卡」按钮：先做可行性预检（方案4），不可达则拦截并提示；
+    /// 通过后启动协程 CoGenerateLevels 逐关生成 + 动态进度条（非阻塞 UI）。
+    /// —— 生成过程中再次点击该按钮 = 取消生成（保留已生成的关卡）。
+    /// </summary>
     private void OnGenerateLevels()
     {
+        // 生成中：本次点击视为「取消生成」
+        if (_isGenerating)
+        {
+            _genCancelled = true;
+            Debug.Log("[UIManager] 玩家点击「取消生成」，将在当前关卡生成完成后停止。");
+            SetDesignMessage("正在取消生成…（当前关卡完成后停止，已生成关卡会保留）", new Color(0.95f, 0.75f, 0.20f));
+            return;
+        }
+
+        // 参数校验：不合法直接拦下，避免用非法参数空转协程
+        if (!ValidateBaseParams(out string paramErr))
+        {
+            SetDesignMessage("⚠ " + paramErr, new Color(0.95f, 0.30f, 0.30f));
+            Debug.LogWarning("[UIManager] 生成已拦截（参数校验失败）：" + paramErr);
+            return;
+        }
+
+        // 方案4：生成前可行性预检——避免在不可达设置上白白空转（默认 5 秒/关）
+        try
+        {
+            var cfgCheck = BuildConfigFromUI();
+            if (!LevelGenerator.CheckFeasibility(cfgCheck, out string reason))
+            {
+                SetDesignMessage("⚠ " + reason, new Color(0.95f, 0.75f, 0.20f));
+                Debug.LogWarning("[UIManager] 生成已拦截（方案4 可行性预检）：" + reason);
+                return;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[UIManager] 可行性预检异常，跳过预检继续生成：" + e.Message);
+        }
+
+        _genCancelled = false;
+        _isGenerating = true;
+        SetGenerateButtonState(true);      // 按钮变红显示「取消生成」并保持可点击
+        SetDesignMessage("", Color.white);
         StartCoroutine(CoGenerateLevels());
     }
 
@@ -707,21 +1078,19 @@ public class UIManager : MonoBehaviour
         List<LevelInstance> generated = new List<LevelInstance>(N);
         int timeoutCount = 0;
         Exception fatalErr = null;
+        bool cancelled = false;
 
         // 外层只有 finally 的 try：容纳所有 yield（合法）；finally 必执行：恢复按钮 + 关进度条
         try
         {
             // —— 同步段 1：初始 UI 状态初始化（不含 yield）
+            //    注意：生成期间按钮必须保持可点击，玩家点击它即「取消生成」，故不在此禁用按钮。
             try
             {
-                if (generateBtn != null) generateBtn.interactable = false;
                 if (_genProgressBar != null) _genProgressBar.SetActive(true);
                 UpdateGenProgress(0f, 0, N, 0);
-                if (ddPreviewText != null)
-                {
-                    ddPreviewText.color = new Color(0.45f, 0.8f, 1f);
-                    ddPreviewText.text = $"正在生成 {N} 个关卡（单关卡超时 {LevelGenerator.TIMEOUT_MS_PER_LEVEL}ms）…";
-                }
+                SetDesignMessage($"正在生成 {N} 个关卡（单关卡超时 {LevelGenerator.TIMEOUT_MS_PER_LEVEL}ms）… 再次点击按钮可取消。",
+                    new Color(0.45f, 0.8f, 1f));
                 // —— 关键：生成前清空旧关卡，保证关卡列表严格等于本次设定数量 N（不累计旧批次）——
                 if (LevelRecordManager.Instance != null)
                 {
@@ -734,19 +1103,22 @@ public class UIManager : MonoBehaviour
             {
                 fatalErr = e;
                 Debug.LogError("[CoGenerateLevels] 初始化 UI 异常：" + e);
-                if (ddPreviewText != null)
-                {
-                    ddPreviewText.color = new Color(0.95f, 0.30f, 0.30f);
-                    ddPreviewText.text = "初始化失败：" + e.Message;
-                }
+                SetDesignMessage("初始化失败：" + e.Message, new Color(0.95f, 0.30f, 0.30f));
             }
             // （yield 放在 try/finally 内，合法）立即渲染一帧显示初始 UI，避免第一关的同步生成把 UI 卡住
             yield return null;
             if (fatalErr != null) yield break;
 
-            // —— 逐关生成循环
+            // —— 逐关生成循环（每轮开始检查取消标志：取消后保留已生成的关卡）
             for (int i = 0; i < N; i++)
             {
+                if (_genCancelled)
+                {
+                    cancelled = true;
+                    Debug.Log($"[CoGenerateLevels] 已取消：完成 {generated.Count}/{N} 关后停止。");
+                    break;
+                }
+
                 LevelInstance lv = null;
                 bool timedOut = false;
 
@@ -800,63 +1172,65 @@ public class UIManager : MonoBehaviour
                 yield return null;
             }
 
-            // 完成态停 0.8s（同步更新进度条 100% → WaitForSeconds 仍在合法 try 内）
-            UpdateGenProgress(1f, N, N, timeoutCount);
-            yield return new WaitForSeconds(0.8f);
+            // —— 完成态：进度条先到 100% 再停 0.8s 让玩家看清。
+            //    yield 只能出现在「只含 finally、不含 catch」的外层 try 内，故此处单独成段。
+            if (!cancelled)
+            {
+                UpdateGenProgress(1f, N, N, timeoutCount);
+                yield return new WaitForSeconds(0.8f);
+            }
 
-            // —— 同步段 4：结果汇总 + 跳列表页（不含 yield）
+            // —— 同步段 4：结果汇总 + 跳列表页（本段不含 yield，可以安全地包在 try/catch 中）
             try
             {
-                string resultMsg;
-                if (generated.Count == 0)
+                if (cancelled)
                 {
-                    resultMsg = $"生成失败：没有产出任何关卡。建议：减小尺寸、减少类型数、或把 8 指标都设为「普通」区间后重试。";
-                    if (ddPreviewText != null)
-                    {
-                        ddPreviewText.color = new Color(0.95f, 0.30f, 0.30f);
-                        ddPreviewText.text = resultMsg;
-                    }
-                }
-                else if (timeoutCount == 0)
-                {
-                    resultMsg = $"生成 {generated.Count}/{N} 个关卡成功。";
-                    Debug.Log($"[LevelDesigner] {resultMsg}");
-                    if (ddPreviewText != null)
-                    {
-                        ddPreviewText.color = new Color(0.35f, 0.85f, 0.45f);
-                        ddPreviewText.text = $"{resultMsg} 点击关卡列表卡片「开始体验」进入。";
-                    }
-                    OpenLevelSelector();
+                    string cancelMsg = generated.Count > 0
+                        ? $"已取消生成：保留前 {generated.Count}/{N} 个关卡（可在关卡列表中查看）。"
+                        : "已取消生成：本次尚未产出关卡。";
+                    Debug.Log($"[LevelDesigner] {cancelMsg}");
+                    SetDesignMessage(cancelMsg, new Color(0.95f, 0.75f, 0.20f));
+                    if (generated.Count > 0) OpenLevelSelector();
                 }
                 else
                 {
-                    resultMsg = $"生成 {generated.Count}/{N} 个关卡完成，其中 {timeoutCount} 个关卡超时（已返回最接近目标的关卡，指标可能未完全命中目标等级）。";
-                    Debug.LogWarning($"[LevelDesigner] {resultMsg}");
-                    if (ddPreviewText != null)
+                    string resultMsg;
+                    if (generated.Count == 0)
                     {
-                        ddPreviewText.color = new Color(0.95f, 0.75f, 0.20f);
-                        ddPreviewText.text = resultMsg;
+                        resultMsg = "生成失败：没有产出任何关卡。建议：减小尺寸、减少类型数、或把 8 指标都设为「普通」区间后重试。";
+                        SetDesignMessage(resultMsg, new Color(0.95f, 0.30f, 0.30f));
                     }
-                    OpenLevelSelector();
+                    else if (timeoutCount == 0)
+                    {
+                        resultMsg = $"生成 {generated.Count}/{N} 个关卡成功。";
+                        Debug.Log($"[LevelDesigner] {resultMsg}");
+                        SetDesignMessage($"{resultMsg} 点击关卡列表卡片「开始体验」进入。", new Color(0.35f, 0.85f, 0.45f));
+                        OpenLevelSelector();
+                    }
+                    else
+                    {
+                        resultMsg = $"生成 {generated.Count}/{N} 个关卡完成，其中 {timeoutCount} 个关卡超时（已返回最接近目标的关卡，指标可能未完全命中目标等级）。";
+                        Debug.LogWarning($"[LevelDesigner] {resultMsg}");
+                        SetDesignMessage(resultMsg, new Color(0.95f, 0.75f, 0.20f));
+                        OpenLevelSelector();
+                    }
                 }
             }
             catch (Exception e)
             {
                 fatalErr = e;
                 Debug.LogError("[CoGenerateLevels] 结果汇总或跳转关卡列表异常：" + e);
-                if (ddPreviewText != null)
-                {
-                    ddPreviewText.color = new Color(0.95f, 0.30f, 0.30f);
-                    ddPreviewText.text = "生成失败：" + e.Message;
-                }
+                SetDesignMessage("生成失败：" + e.Message, new Color(0.95f, 0.30f, 0.30f));
             }
         }
         finally
         {
-            if (generateBtn != null) generateBtn.interactable = true;
+            _isGenerating = false;
+            _genCancelled = false;
+            SetGenerateButtonState(false);   // 恢复橙色「生成关卡」
             if (_genProgressBar != null)
             {
-                // 失败时停留 1.2s 让玩家读完错误后再关进度条；成功情况前面已经停 0.8s，这里立即关
+                // 失败时停留 1.2s 让玩家读完错误后再关进度条；其余情况立即关
                 if (fatalErr != null)
                     StartCoroutine(CloseProgressBarDelayed(1.2f));
                 else
@@ -962,9 +1336,18 @@ public class UIManager : MonoBehaviour
                 pivot: btnPivot);
             recBtn.GetComponent<Image>().color = new Color(0.3f, 0.55f, 1f);
 
+            // 第三个按钮「指标报告」：放在两按钮左侧一列（卡片文本区右边界 x=420，本按钮左边界 460，不重叠）
+            Button metricBtn = MakeUIButton(card.transform, "MetricBtn", "指标报告",
+                btnAnchor, btnAnchor,
+                new Vector2(-190f, 55f),
+                btnSize, font,
+                pivot: btnPivot);
+            metricBtn.GetComponent<Image>().color = new Color(0.30f, 0.68f, 0.62f);
+
             string lid = lv.id; // 闭包
             playBtn.onClick.AddListener(() => OnPlayLevel(lid));
             recBtn.onClick.AddListener(() => ShowRecordPanel(lid));
+            metricBtn.onClick.AddListener(() => ShowMetricReport(lid));
         }
         contentRT.sizeDelta = new Vector2(contentRT.sizeDelta.x, yAcc + 20f);
     }
@@ -994,6 +1377,7 @@ public class UIManager : MonoBehaviour
             if (levelDesignPanel != null) levelDesignPanel.SetActive(false);
             if (levelSelectorPanel != null) levelSelectorPanel.SetActive(false);
             if (recordPanel != null) recordPanel.SetActive(false);
+            if (metricReportPanel != null) metricReportPanel.SetActive(false);
             if (gameHud != null) gameHud.SetActive(true);
 
             if (GameController.Instance == null)

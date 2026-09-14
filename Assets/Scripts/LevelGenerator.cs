@@ -117,6 +117,7 @@ public static class LevelGenerator
             }
 
             // 详细指标日志：目标 8 指标/DD/难度等级 → 实际值 → 偏差（达标 Log，超时/未达标 LogWarning）
+            AttachTargets(best, targetNorms, targetDD);
             LogMetricReport(targetNorms, targetDD, best, best.generationTimedOut || bestDev > 0.001f);
 
             result.Add(best);
@@ -172,6 +173,7 @@ public static class LevelGenerator
             fallback.generationTimedOut = true;
             fallback.remark = "生成失败，已按给定行列与配对类型数随机生成一个关卡";
             Debug.LogWarning($"[LevelGenerator] GenerateSingle 生成失败，使用随机关卡兜底：R={cfg.rows}, C={cfg.cols}, T={cfg.typeCount}");
+            AttachTargets(fallback, targetNorms, targetDD);
             LogMetricReport(targetNorms, targetDD, fallback, true);
             return fallback;
         }
@@ -190,6 +192,7 @@ public static class LevelGenerator
                 : string.Empty;
         }
         // 详细指标日志：目标 8 指标/DD/难度等级 → 实际值 → 偏差（达标 Log，超时/未达标 LogWarning）
+        AttachTargets(best, targetNorms, targetDD);
         LogMetricReport(targetNorms, targetDD, best, best.generationTimedOut || bestDev > 0.001f);
         return best;
     }
@@ -436,6 +439,171 @@ public static class LevelGenerator
         }
     }
 
+    // ================================================================
+    // 方案4：可达性预检（设计器端阻止不可达输入，避免 5 秒空转）
+    // ================================================================
+
+    /// <summary>8 个指标的中文简称（用于不可达提示）。</summary>
+    public static string MetricName(int i)
+    {
+        switch ((MetricId)i)
+        {
+            case MetricId.VMD: return "M1 有效解密度";
+            case MetricId.TTE: return "M2 图标类型熵";
+            case MetricId.TSD: return "M3 空间离散度";
+            case MetricId.APT: return "M4 平均转弯数";
+            case MetricId.CPR: return "M5 复杂路径占比";
+            case MetricId.DW:  return "M6 决策宽度";
+            case MetricId.DF:  return "M7 死锁频率";
+            case MetricId.SB:  return "M8 解序列分支度";
+            default: return $"M{i + 1}";
+        }
+    }
+
+    /// <summary>
+    /// 估算当前尺寸/类型数下各指标归一值的**可达区间** [min, max]（方案4）。
+    /// - M2 TTE：下界由"最不均匀类型分布"的熵精确推导（分布迁移算子可达该极限），上界 1（完全均匀）；
+    /// - M1/M3/M4/M5：由布局决定，理论可达 [0,1]，其中 VMD/TSD 取保守经验上界；
+    /// - M6/M7/M8：依赖整局蒙特卡洛模拟，按生成器实际表现给出保守经验范围。
+    /// </summary>
+    public static float[,] EstimateReachableRanges(int rows, int cols, int typeCount)
+    {
+        float[,] r = new float[8, 2];
+        int total = Mathf.Max(4, rows * cols);
+        int pairs = Mathf.Max(1, total / 2);
+        int k = Mathf.Max(1, Mathf.Min(typeCount, pairs));
+
+        // M1 VMD_norm：满盘上"极少可连通"很难构造，经验上界 0.85
+        r[(int)MetricId.VMD, 0] = 0f;
+        r[(int)MetricId.VMD, 1] = 0.85f;
+
+        // M2 TTE_norm：下界 = 最不均匀分布的归一化熵；上界 1（完全均匀）
+        r[(int)MetricId.TTE, 0] = MinTypeEntropyNorm(pairs, k);
+        r[(int)MetricId.TTE, 1] = 1f;
+
+        // M3 TSD_norm：理论 [0,1]，极难布满全盘，保守取 0.90
+        r[(int)MetricId.TSD, 0] = 0f;
+        r[(int)MetricId.TSD, 1] = 0.90f;
+
+        // M4 APT_norm / M5 CPR_norm：由路径分布决定，可达 [0,1]
+        r[(int)MetricId.APT, 0] = 0f; r[(int)MetricId.APT, 1] = 1f;
+        r[(int)MetricId.CPR, 0] = 0f; r[(int)MetricId.CPR, 1] = 1f;
+
+        // M6 DW_norm：U 型（DW≤2 → 1，[2,8] → 0，[8,pairs] → 1）；极低端（几乎无解）极难构造
+        r[(int)MetricId.DW, 0] = 0.05f;
+        r[(int)MetricId.DW, 1] = 1f;
+
+        // M7 DF_norm：正常生成几乎不死锁，高值极难，经验上界 0.25
+        r[(int)MetricId.DF, 0] = 0f;
+        r[(int)MetricId.DF, 1] = 0.25f;
+
+        // M8 SB_norm：U 型（logSB≤5 → 1，[5,40] → 0，>40 → 回升）；经验下界 0.05
+        r[(int)MetricId.SB, 0] = 0.05f;
+        r[(int)MetricId.SB, 1] = 1f;
+
+        return r;
+    }
+
+    /// <summary>
+    /// M2 TTE 的下界：类型分布最不均匀时的归一化熵。
+    /// 最不均匀分布 = 1 个类型占 (pairs-K+1) 对，其余 K-1 个类型各 1 对（生成器的分布迁移算子可达该极限）。
+    /// </summary>
+    private static float MinTypeEntropyNorm(int pairs, int K)
+    {
+        if (K <= 1 || pairs <= 1) return 0f;
+        int k = Mathf.Max(1, Mathf.Min(K, pairs));
+        int dominant = Mathf.Max(1, pairs - (k - 1));
+        float total = 2f * pairs;
+        float pMain = (2f * dominant) / total;
+        float pOther = 2f / total;
+
+        float h = 0f;
+        if (pMain > 0f && pMain < 1f) h -= pMain * Mathf.Log(pMain, 2f);
+        if (pOther > 0f && pOther < 1f) h -= (k - 1) * pOther * Mathf.Log(pOther, 2f);
+        float maxEnt = Mathf.Log(k, 2f);
+        return maxEnt > 0f ? Mathf.Clamp01(h / maxEnt) : 0f;
+    }
+
+    /// <summary>判断单个指标约束的目标（等级区间 / 精确值）与可达区间 [rLo, rHi] 是否有交集。</summary>
+    private static bool IsTargetReachable(MetricConstraint mc, float rLo, float rHi)
+    {
+        if (mc == null) return true;
+        float lo, hi;
+        if (mc.useGrade)
+        {
+            int gi = Mathf.Clamp((int)mc.grade, 0, 4);
+            lo = DifficultyGradeUtil.GradeLower[gi];
+            hi = (gi == 4) ? 1f : DifficultyGradeUtil.GradeUpper[gi];
+        }
+        else
+        {
+            lo = hi = Mathf.Clamp01(mc.normalizedValue);
+        }
+        const float eps = 0.02f; // 容差：允许贴着区间边界
+        return (hi + eps) >= rLo && (lo - eps) <= rHi;
+    }
+
+    /// <summary>统计"显式设置且在当前尺寸/类型数下不可达"的指标数量（方案4，供设计器实时提示）。</summary>
+    public static int CountUnreachableExplicit(LevelConfig cfg)
+    {
+        if (cfg == null || cfg.metrics == null || cfg.metrics.Count != 8) return 0;
+        bool[] flags; bool anyExplicit;
+        GetExplicitMetricFlags(cfg, out flags, out anyExplicit);
+        if (!anyExplicit) return 0;
+
+        float[,] ranges = EstimateReachableRanges(cfg.rows, cfg.cols, cfg.typeCount);
+        int count = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            if (!flags[i]) continue;
+            if (!IsTargetReachable(cfg.metrics[i], ranges[i, 0], ranges[i, 1])) count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// 可行性预检（方案4）：检查玩家显式设置的指标目标能否在当前尺寸/类型数下达成。
+    /// 返回 false 时 reason 列出不可达指标及其目标区间与可达区间，供 UI 提示，避免进入 5 秒空转。
+    /// </summary>
+    public static bool CheckFeasibility(LevelConfig cfg, out string reason)
+    {
+        reason = null;
+        if (cfg == null || cfg.metrics == null || cfg.metrics.Count != 8) return true;
+
+        bool[] flags; bool anyExplicit;
+        GetExplicitMetricFlags(cfg, out flags, out anyExplicit);
+        if (!anyExplicit) return true;
+
+        float[,] ranges = EstimateReachableRanges(cfg.rows, cfg.cols, cfg.typeCount);
+        List<string> bad = new List<string>();
+        for (int i = 0; i < 8; i++)
+        {
+            if (!flags[i]) continue;
+            MetricConstraint mc = cfg.metrics[i];
+            if (IsTargetReachable(mc, ranges[i, 0], ranges[i, 1])) continue;
+
+            float lo, hi;
+            if (mc != null && mc.useGrade)
+            {
+                int gi = Mathf.Clamp((int)mc.grade, 0, 4);
+                lo = DifficultyGradeUtil.GradeLower[gi];
+                hi = (gi == 4) ? 1f : DifficultyGradeUtil.GradeUpper[gi];
+            }
+            else
+            {
+                lo = hi = Mathf.Clamp01(mc != null ? mc.normalizedValue : 0f);
+            }
+            bad.Add($"{MetricName(i)}(目标 {lo:F2}~{hi:F2}，可达 {ranges[i, 0]:F2}~{ranges[i, 1]:F2})");
+        }
+
+        if (bad.Count > 0)
+        {
+            reason = "以下指标在当前尺寸/类型数下不可达：" + string.Join("；", bad) + "。建议调整行列数/配对类型数，或改用「按分级」设置。";
+            return false;
+        }
+        return true;
+    }
+
     /// <summary>
     /// 计算单个指标相对其约束的"达标偏差"：
     /// - useGrade=true：实际值到目标等级区间的距离（区间内=0，即达标）；
@@ -539,6 +707,62 @@ public static class LevelGenerator
     private static string FmtDev(float d)
     {
         return (d >= 0f ? "+" : "-") + Mathf.Abs(d).ToString("F3");
+    }
+
+    /// <summary>
+    /// 记录关卡实际使用的生成目标（8 指标归一值 + 目标 DD），供关卡列表展示「指标生成报告」。
+    /// 展示端据此得到与生成日志完全一致的目标值（按分级模式的目标值在生成时随机确定，事后无法复现）。
+    /// </summary>
+    private static void AttachTargets(LevelInstance lv, float[] targetNorms, float targetDD)
+    {
+        if (lv == null) return;
+        lv.targetNorms = new List<float>(targetNorms ?? new float[8]);
+        lv.targetDD = targetDD;
+    }
+
+    /// <summary>
+    /// 获取某关卡的「指标生成报告」多行文本（目标 → 实际 → 偏差），内容与生成关卡时的控制台日志一致。
+    /// 供关卡列表的「指标报告」按钮展示。
+    /// </summary>
+    public static string GetMetricReport(LevelInstance lv)
+    {
+        if (lv == null || lv.metrics == null) return "（无指标数据可报告）";
+
+        bool hasStoredTarget = lv.targetNorms != null && lv.targetNorms.Count == 8;
+        float[] targets = hasStoredTarget ? lv.targetNorms.ToArray() : EstimateTargetsFromConfig(lv.config);
+        float targetDD = lv.targetDD >= 0f ? lv.targetDD : DifficultyAnalyzer.PredictOverallDD(targets);
+
+        string report = FormatMetricReport(targets, targetDD, lv);
+        if (!hasStoredTarget)
+            report += "  （注：该关卡为旧版本存档，无生成目标记录；上表目标值按配置推算，其中「按分级」项取所在等级区间中点）";
+        return report;
+    }
+
+    /// <summary>
+    /// 旧存档兜底：按配置推算 8 个指标的目标归一值。
+    /// 「按数值」取精确值；「按分级」取该等级区间的中点（确定性估算，非生成时的随机采样值）。
+    /// </summary>
+    private static float[] EstimateTargetsFromConfig(LevelConfig cfg)
+    {
+        float[] norms = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+        if (cfg == null || cfg.metrics == null || cfg.metrics.Count != 8) return norms;
+
+        for (int i = 0; i < 8; i++)
+        {
+            var m = cfg.metrics[i];
+            if (m.useGrade)
+            {
+                int gi = Mathf.Clamp((int)m.grade, 0, 4);
+                float lo = DifficultyGradeUtil.GradeLower[gi];
+                float hi = (gi == 4) ? 1f : DifficultyGradeUtil.GradeUpper[gi];
+                norms[i] = (lo + hi) * 0.5f;
+            }
+            else
+            {
+                norms[i] = Mathf.Clamp01(m.normalizedValue);
+            }
+        }
+        return norms;
     }
 
     /// <summary>生成配对类型列表：长度 == rows*cols，按行优先。</summary>
